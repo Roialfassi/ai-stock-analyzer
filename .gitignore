@@ -1,0 +1,252 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# pdm
+.pdm.toml
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+.idea/
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+
+# Application specific
+*.db
+*.sqlite
+*.sqlite3
+market_data.db
+cache/
+logs/
+exports/
+reports/
+
+# Configuration files with secrets
+config.ini
+config.json
+secrets.json
+*.key
+api_keys.json
+
+# User data
+portfolios/
+watchlists/
+user_settings.json
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# Test data
+test_data/
+mock_data/
+
+# Documentation build
+docs/build/
+docs/source/_build/
+
+# Performance profiling
+*.prof
+*.lprof
+
+# Qt Designer files
+*.ui
+
+# Compiled Qt resource files
+*_rc.py
+
+# PyQt generated files
+ui_*.py
+
+# Application state files
+window_state.dat
+session.dat
+
+# Market data cache
+market_cache/
+historical_data/
+
+# Export files (but keep the directory)
+exports/*
+!exports/.gitkeep
+
+# Log files (but keep the directory)
+logs/*
+!logs/.gitkeep
+
+# User preferences
+preferences.ini
+user_preferences.json
+
+# Backup files
+backups/
+*.backup
+
+# SSL certificates
+*.pem
+*.crt
+
+# Archive files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# LLM response cache
+llm_cache/
+.llm_responses/
+
+# Development notes
+notes.txt
+TODO.md
+scratch.py
+
+# Performance reports
+performance_reports/
+profiling/
