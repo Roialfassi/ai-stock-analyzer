@@ -16,9 +16,6 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QFormLayout, QSpinBox, QDoubleSpinBox,
     QProgressDialog
 )
-
-from PyQt6.QtGui import QAction
-
 from PyQt6.QtCore import (
     Qt, QTimer, QThread, pyqtSignal, QSettings,
     QSize, QPoint, QByteArray, QFileInfo
@@ -42,6 +39,7 @@ from portfolio import PortfolioManager
 
 logger = logging.getLogger(__name__)
 
+
 class AsyncWorker(QThread):
     """Worker thread for async operations"""
 
@@ -64,6 +62,7 @@ class AsyncWorker(QThread):
             self.error_occurred.emit(str(e))
         finally:
             loop.close()
+
 
 class SettingsDialog(QDialog):
     """Settings dialog for API keys and preferences"""
@@ -111,10 +110,10 @@ class SettingsDialog(QDialog):
         self.lmstudio_url.setText(self.settings.value("lmstudio_url", "http://localhost:1234"))
         api_layout.addRow("LM Studio URL:", self.lmstudio_url)
 
-        self.alphavantage_key = QLineEdit()
-        self.alphavantage_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.alphavantage_key.setText(self.settings.value("alphavantage_key", ""))
-        api_layout.addRow("Alpha Vantage API Key:", self.alphavantage_key)
+        # Note about data source
+        data_note = QLabel("📊 All market data is fetched from Yahoo Finance (yfinance)")
+        data_note.setStyleSheet("color: #8b92a1; font-style: italic; padding: 10px;")
+        api_layout.addRow(data_note)
 
         tabs.addTab(api_widget, "API Keys")
 
@@ -158,21 +157,28 @@ class SettingsDialog(QDialog):
         self.settings.setValue("gemini_key", self.gemini_key.text())
         self.settings.setValue("huggingface_key", self.huggingface_key.text())
         self.settings.setValue("lmstudio_url", self.lmstudio_url.text())
-        self.settings.setValue("alphavantage_key", self.alphavantage_key.text())
         self.settings.setValue("theme", self.theme_combo.currentText())
         self.settings.setValue("llm_provider", self.llm_provider.currentText())
         self.settings.setValue("update_interval", self.update_interval.value())
 
         self.accept()
 
+
 class MainWindow(QMainWindow):
     """Main application window"""
 
-    def __init__(self):
+    def __init__(self, startup_config: Optional[Dict[str, Any]] = None):
         super().__init__()
+
+        # Store startup config
+        self.startup_config = startup_config or {}
 
         # Initialize settings
         self.settings = QSettings("StockAnalyzer", "Settings")
+
+        # Apply startup config to settings
+        if startup_config:
+            self.apply_startup_config(startup_config)
 
         # Initialize services
         self.init_services()
@@ -196,6 +202,47 @@ class MainWindow(QMainWindow):
         # Show welcome message
         self.statusBar().showMessage("Welcome to AI Stock Analyzer", 3000)
 
+        # Load initial data if not in demo mode
+        if not self.startup_config.get('demo_mode', False):
+            if not self.startup_config.get('skip_market_data', False):
+                QTimer.singleShot(100, self.load_initial_data)
+
+    def apply_startup_config(self, config: Dict[str, Any]):
+        """Apply startup configuration to settings"""
+        provider = config.get('provider', 'openai')
+
+        # Set LLM provider
+        self.settings.setValue('llm_provider', provider.title())
+
+        # Set API keys and settings based on provider
+        if provider == 'openai':
+            self.settings.setValue('openai_key', config.get('api_key', ''))
+            self.settings.setValue('openai_model', config.get('model', 'gpt-4'))
+        elif provider == 'anthropic':
+            self.settings.setValue('anthropic_key', config.get('api_key', ''))
+            self.settings.setValue('anthropic_model', config.get('model', ''))
+        elif provider == 'gemini':
+            self.settings.setValue('gemini_key', config.get('api_key', ''))
+        elif provider == 'huggingface':
+            self.settings.setValue('huggingface_key', config.get('api_key', ''))
+            self.settings.setValue('huggingface_model', config.get('model', ''))
+        elif provider == 'lmstudio':
+            settings = config.get('settings', {})
+            self.settings.setValue('lmstudio_url', settings.get('url', 'http://localhost:1234'))
+            self.settings.setValue('lmstudio_model', config.get('model', ''))
+
+    def load_initial_data(self):
+        """Load initial market data"""
+        self.statusBar().showMessage("Loading market data...", 0)
+
+        # Update market overview
+        self.update_market_data()
+
+        # Update watchlist
+        self.update_watchlist_display()
+
+        self.statusBar().showMessage("Ready", 3000)
+
     def init_services(self):
         """Initialize backend services"""
         # Market data provider
@@ -208,10 +255,8 @@ class MainWindow(QMainWindow):
         self.stock_analyzer = StockAnalyzer(self.llm_provider)
         self.nl_screener = NaturalLanguageScreener(self.llm_provider)
         self.stock_screener = StockScreener(self.data_provider, self.nl_screener)
-
         # Portfolio manager
         self.portfolio_manager = PortfolioManager(self.data_provider)
-
         # Current state
         self.current_symbol = None
         self.current_analysis = None
@@ -243,7 +288,7 @@ class MainWindow(QMainWindow):
 
         # Fallback
         QMessageBox.warning(self, "Warning",
-                          "No LLM provider configured. Please set API keys in settings.")
+                            "No LLM provider configured. Please set API keys in settings.")
         return None
 
     def init_ui(self):
@@ -676,6 +721,15 @@ class MainWindow(QMainWindow):
         self.settings.setValue("theme", theme)
         self.apply_theme()
 
+    def toggle_theme(self):
+        """Toggle between dark and light theme"""
+        current_theme = self.settings.value("theme", "Dark")
+        new_theme = "Light" if current_theme == "Dark" else "Dark"
+        self.change_theme(new_theme)
+
+        # Update button icon
+        self.theme_btn.setText("☀️" if new_theme == "Light" else "🌙")
+
     def show_about(self):
         """Show about dialog"""
         QMessageBox.about(
@@ -978,6 +1032,7 @@ class MainWindow(QMainWindow):
 
     def update_market_data(self):
         """Update market overview data"""
+
         async def get_market_data():
             return await self.data_provider.get_market_overview()
 
@@ -1018,7 +1073,10 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-def main():
+import asyncio
+
+
+async def main():
     """Main application entry point"""
     # Configure logging
     logging.basicConfig(
@@ -1034,8 +1092,30 @@ def main():
     # Set application style
     app.setStyle("Fusion")
 
-    # Create and show main window
-    window = MainWindow()
+    # Import startup config
+    from startup_config import StartupConfigDialog
+
+    # Show startup configuration dialog
+    config_dialog = StartupConfigDialog()
+
+    config = None
+
+    def on_config_complete(cfg):
+        nonlocal config
+        config = cfg
+
+    config_dialog.config_complete.connect(on_config_complete)
+
+    if config_dialog.exec() != QDialog.DialogCode.Accepted:
+        # User cancelled
+        sys.exit(0)
+
+    if not config:
+        QMessageBox.critical(None, "Error", "No configuration provided")
+        sys.exit(1)
+
+    # Create and show main window with config
+    window = MainWindow(startup_config=config)
     window.show()
 
     # Run application
@@ -1043,4 +1123,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

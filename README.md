@@ -41,6 +41,13 @@ This application combines the power of Large Language Models (LLMs) with real-ti
 ### Prerequisites
 - Python 3.8 or higher
 - Windows, macOS, or Linux
+- No external API keys required for market data (uses yfinance)
+- LLM API key (choose one):
+  - OpenAI API key for GPT-4
+  - Anthropic API key for Claude
+  - Google API key for Gemini
+  - HuggingFace token
+  - OR run locally with LM Studio (no API key needed)
 
 ### Setup
 
@@ -68,21 +75,104 @@ pip install -r requirements.txt
 
 4. Run the application:
 ```bash
+# Normal startup with configuration dialog
 python main_window.py
+
+# Or use the CLI for preset-based startup
+python cli.py --preset "Quick Start - OpenAI"
 ```
 
 ## Configuration
 
-### API Keys
+### First-Time Setup
 
-On first launch, go to **File → Settings** to configure your API keys:
+When you first run the application, you'll see a startup configuration dialog where you can:
 
-- **OpenAI API Key**: For GPT-4 analysis (get from [OpenAI](https://platform.openai.com))
-- **Anthropic API Key**: For Claude analysis (get from [Anthropic](https://console.anthropic.com))
+1. **Choose your LLM provider**:
+   - OpenAI (GPT-4)
+   - Anthropic (Claude)
+   - Google Gemini
+   - HuggingFace
+   - LM Studio (local)
 
-### LLM Provider
+2. **Enter your API credentials**
+3. **Save as a preset** for quick access later
+4. **Test the connection** before starting
 
-You can choose between OpenAI and Anthropic as your LLM provider in the settings. The application will use the selected provider for all AI-powered analysis.
+### Command Line Usage
+
+The application includes a CLI for automation and quick startup:
+
+```bash
+# List all saved presets
+python cli.py --list
+
+# Run with a specific preset
+python cli.py --preset "My GPT-4 Config"
+
+# Skip market data download for faster startup
+python cli.py --preset "Quick Start" --skip-market-data
+
+# Run in demo mode with mock data
+python cli.py --preset "Local LLM" --demo
+
+# Create a new preset from command line
+python cli.py --create "Production" --provider openai --api-key "sk-..." --model gpt-4
+```
+
+### LLM Provider Setup
+
+#### OpenAI
+1. Get API key from [OpenAI Platform](https://platform.openai.com/api-keys)
+2. Choose model: `gpt-4`, `gpt-4-turbo-preview`, or `gpt-3.5-turbo`
+3. Enter in startup dialog or use CLI
+
+#### Anthropic
+1. Get API key from [Anthropic Console](https://console.anthropic.com/)
+2. Models: `claude-3-opus` or `claude-3-sonnet`
+3. Enter in startup dialog
+
+#### Google Gemini
+1. Get API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
+2. Uses Gemini Pro model
+3. Fast and cost-effective
+
+#### HuggingFace
+1. Get token from [HuggingFace Settings](https://huggingface.co/settings/tokens)
+2. Choose from models like Mixtral, Llama 2, Falcon
+3. Great for open-source models
+
+#### LM Studio (Local)
+1. Download [LM Studio](https://lmstudio.ai/)
+2. Load any GGUF model
+3. Start server (default: http://localhost:1234)
+4. No API key required!
+
+### Market Data
+
+**All market data is fetched from Yahoo Finance (yfinance) - no additional API keys required!**
+
+The application fetches:
+- Real-time stock prices
+- Historical data
+- Financial statements
+- Technical indicators
+- Market indices
+- Sector performance
+
+## Features
+
+### 🔍 Enhanced Natural Language Screening
+
+The screener now works efficiently with yfinance data and supports:
+
+- **Sector-based queries**: "Show me all healthcare stocks" 
+- **Financial metrics**: "Stocks with P/E under 20 and dividend yield over 3%"
+- **Technical patterns**: "Find stocks with bullish momentum"
+- **Market cap filters**: "Large cap tech stocks" or "Small cap growth stocks"
+- **Advanced filters**: "Oversold stocks near 52-week lows"
+
+The screener intelligently optimizes which stocks to fetch based on your query, making it fast and efficient.
 
 ## Usage
 
@@ -240,6 +330,8 @@ This application is for educational and informational purposes only. It is not f
 ## Support
 
 For issues and feature requests, please use the GitHub issue tracker.
+
+For questions and discussions, join our Discord community: [discord.gg/stockanalysis](https://discord.gg/stockanalysis)
 
 ---
 

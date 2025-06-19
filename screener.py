@@ -24,22 +24,136 @@ class StockScreener:
         self.data_provider = data_provider
         self.nl_screener = nl_screener
         self.stock_universe = []
+        self.cache = ScreenerCache()
         self._load_stock_universe()
 
+        # Preload some data for faster screening
+        self.preloaded_data = {}
+        asyncio.create_task(self._preload_popular_stocks())
+
+    async def _preload_popular_stocks(self):
+        """Preload data for popular stocks to speed up screening"""
+        popular = self.stock_universe[:50]  # Top 50 stocks
+
+        try:
+            for symbol in popular:
+                data = await self.data_provider.get_stock_data(symbol)
+                if data:
+                    self.preloaded_data[symbol] = data
+        except Exception as e:
+            logger.error(f"Error preloading stocks: {e}")
+
+    async def _fetch_stock_data(self, symbols: List[str]) -> List[StockData]:
+        """Fetch data for multiple stocks with preloaded cache"""
+        stocks = []
+        symbols_to_fetch = []
+
+        # Use preloaded data where available
+        for symbol in symbols:
+            if symbol in self.preloaded_data:
+                stocks.append(self.preloaded_data[symbol])
+            else:
+                symbols_to_fetch.append(symbol)
+
+        # Fetch remaining stocks
+        if symbols_to_fetch:
+            fetched = await self._fetch_stock_data_batch(symbols_to_fetch)
+            stocks.extend(fetched)
+
+        return stocks
+
     def _load_stock_universe(self):
-        """Load list of available stocks"""
-        # In production, this would load from a database or API
-        # For now, use a sample list
-        self.stock_universe = [
-            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA", "JPM",
-            "JNJ", "V", "PG", "UNH", "HD", "MA", "DIS", "PYPL", "BAC", "ADBE",
-            "NFLX", "CRM", "XOM", "VZ", "INTC", "WMT", "CVX", "KO", "PFE",
-            "ABBV", "NKE", "TMO", "CSCO", "PEP", "ABT", "AVGO", "MRK", "ACN"
+        """Load comprehensive list of stocks from multiple sources"""
+        # Major US stocks - expanded list
+        major_stocks = [
+            # Tech giants
+            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA", "INTC", "AMD", "ORCL",
+            "CRM", "ADBE", "NFLX", "CSCO", "AVGO", "QCOM", "TXN", "IBM", "MU", "AMAT",
+            "LRCX", "ADI", "PYPL", "SQ", "SHOP", "UBER", "SNAP", "PINS", "ROKU", "DOCU",
+
+            # Finance
+            "JPM", "BAC", "WFC", "GS", "MS", "C", "USB", "PNC", "AXP", "BLK",
+            "SCHW", "COF", "BK", "TFC", "SPGI", "CME", "ICE", "V", "MA", "PYPL",
+
+            # Healthcare
+            "JNJ", "UNH", "PFE", "ABBV", "TMO", "MRK", "ABT", "DHR", "CVS", "BMY",
+            "AMGN", "GILD", "MDT", "ISRG", "VRTX", "REGN", "ZTS", "MRNA", "BIIB", "ILMN",
+
+            # Consumer
+            "WMT", "HD", "PG", "KO", "PEP", "COST", "MCD", "NKE", "SBUX", "TGT",
+            "LOW", "CVX", "XOM", "DIS", "CMCSA", "NFLX", "T", "VZ", "TMUS", "CHTR",
+
+            # Industrial
+            "BA", "CAT", "GE", "MMM", "HON", "UPS", "RTX", "LMT", "DE", "EMR",
+            "ITW", "ETN", "NOC", "GD", "FDX", "NSC", "UNP", "CSX", "WM", "RSG",
+
+            # Energy
+            "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "KMI",
+            "WMB", "HAL", "BKR", "DVN", "HES", "MRO", "APA", "FANG", "CTRA", "OKE",
+
+            # Real Estate
+            "AMT", "PLD", "CCI", "EQIX", "PSA", "SPG", "WELL", "AVB", "EQR", "DLR",
+            "O", "SBAC", "WY", "VTR", "PEAK", "ARE", "MAA", "INVH", "UDR", "HST",
+
+            # Materials
+            "LIN", "APD", "SHW", "ECL", "DD", "NEM", "FCX", "DOW", "PPG", "CTVA",
+            "ALB", "EMN", "CE", "VMC", "MLM", "NUE", "STLD", "CLF", "X", "RS",
+
+            # Utilities
+            "NEE", "DUK", "SO", "D", "SRE", "AEP", "EXC", "XEL", "PEG", "ED",
+            "WEC", "ES", "AWK", "DTE", "ETR", "AEE", "CMS", "CNP", "ATO", "NI"
         ]
 
-    async def screen_stocks(self, query: str) -> ScreeningResult:
-        """Screen stocks based on natural language query"""
+        # Get S&P 500 components from Wikipedia (using yfinance)
+        try:
+            sp500_table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
+            sp500_symbols = sp500_table['Symbol'].tolist()
+
+            # Clean symbols (remove dots, special characters)
+            sp500_symbols = [s.replace('.', '-') for s in sp500_symbols]
+
+            # Combine with major stocks
+            self.stock_universe = list(set(major_stocks + sp500_symbols))
+        except:
+            # Fallback to predefined list
+            self.stock_universe = major_stocks
+
+        # Add popular ETFs for sector screening
+        self.etf_universe = {
+            'SPY': 'S&P 500',
+            'QQQ': 'Nasdaq 100',
+            'DIA': 'Dow Jones',
+            'IWM': 'Russell 2000',
+            'XLK': 'Technology',
+            'XLV': 'Healthcare',
+            'XLF': 'Financials',
+            'XLE': 'Energy',
+            'XLY': 'Consumer Discretionary',
+            'XLP': 'Consumer Staples',
+            'XLI': 'Industrials',
+            'XLB': 'Materials',
+            'XLRE': 'Real Estate',
+            'XLU': 'Utilities',
+            'GLD': 'Gold',
+            'SLV': 'Silver',
+            'USO': 'Oil',
+            'UNG': 'Natural Gas',
+            'VNQ': 'Real Estate',
+            'AGG': 'Bonds'
+        }
+
+        logger.info(f"Loaded {len(self.stock_universe)} stocks in universe")
+
+    async def screen_stocks(self, query: str, use_cache: bool = True) -> ScreeningResult:
+        """Screen stocks based on natural language query with efficient data fetching"""
         start_time = datetime.now()
+
+        # Check cache first
+        if use_cache:
+            cache_key = f"screen:{query}"
+            cached = self.cache.get(cache_key)
+            if cached:
+                return ScreeningResult(**cached)
 
         # Parse the query
         parsed_query = await self.nl_screener.parse_query(query)
@@ -54,8 +168,11 @@ class StockScreener:
             limit=parsed_query.get('limit', 50)
         )
 
-        # Get stock data for universe
-        stock_data = await self._fetch_stock_data(self.stock_universe)
+        # Determine which stocks to fetch based on query
+        stocks_to_fetch = self._optimize_stock_selection(parsed_query)
+
+        # Batch fetch stock data efficiently
+        stock_data = await self._fetch_stock_data_batch(stocks_to_fetch)
 
         # Apply filters
         filtered_stocks = self._apply_filters(stock_data, screening_query.filters)
@@ -66,6 +183,10 @@ class StockScreener:
                 filtered_stocks,
                 parsed_query['qualitative']
             )
+
+        # Apply advanced filters if needed
+        if self._needs_advanced_filtering(parsed_query):
+            filtered_stocks = await self._apply_advanced_filters(filtered_stocks, parsed_query)
 
         # Sort results
         sorted_stocks = self._sort_stocks(
@@ -83,7 +204,7 @@ class StockScreener:
         # Calculate execution time
         execution_time = (datetime.now() - start_time).total_seconds()
 
-        return ScreeningResult(
+        result = ScreeningResult(
             query=screening_query,
             matches=final_stocks,
             total_count=len(final_stocks),
@@ -91,10 +212,159 @@ class StockScreener:
             explanations=explanations
         )
 
-    async def _fetch_stock_data(self, symbols: List[str]) -> List[StockData]:
-        """Fetch data for multiple stocks"""
-        stocks_dict = await self.data_provider.batch_get_stocks(symbols)
-        return list(stocks_dict.values())
+        # Cache result
+        if use_cache:
+            self.cache.set(cache_key, result.__dict__, 300)  # 5 min cache
+
+        return result
+
+    def _optimize_stock_selection(self, parsed_query: Dict[str, Any]) -> List[str]:
+        """Optimize which stocks to fetch based on query"""
+        qualitative = parsed_query.get('qualitative', {})
+        sector = qualitative.get('sector', '').lower()
+
+        # If sector specified, filter universe first
+        if sector:
+            sector_map = {
+                'technology': ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'INTC', 'AMD', 'CRM', 'ADBE', 'ORCL', 'CSCO',
+                               'AVGO', 'QCOM', 'TXN', 'MU'],
+                'healthcare': ['JNJ', 'UNH', 'PFE', 'ABBV', 'TMO', 'MRK', 'ABT', 'CVS', 'BMY', 'AMGN', 'GILD', 'MDT',
+                               'ISRG', 'VRTX', 'MRNA'],
+                'finance': ['JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'AXP', 'BLK', 'SCHW', 'V', 'MA', 'PYPL', 'COF', 'USB',
+                            'PNC'],
+                'energy': ['XOM', 'CVX', 'COP', 'SLB', 'EOG', 'MPC', 'PSX', 'VLO', 'OXY', 'KMI', 'HAL', 'BKR', 'DVN',
+                           'FANG'],
+                'consumer': ['WMT', 'HD', 'PG', 'KO', 'PEP', 'COST', 'MCD', 'NKE', 'SBUX', 'TGT', 'LOW', 'DIS', 'CMCSA',
+                             'NFLX'],
+                'industrial': ['BA', 'CAT', 'GE', 'MMM', 'HON', 'UPS', 'RTX', 'LMT', 'DE', 'EMR', 'FDX', 'NSC', 'UNP',
+                               'WM'],
+                'realestate': ['AMT', 'PLD', 'CCI', 'EQIX', 'PSA', 'SPG', 'WELL', 'AVB', 'EQR', 'DLR', 'O', 'SBAC',
+                               'WY', 'VTR'],
+                'materials': ['LIN', 'APD', 'SHW', 'ECL', 'DD', 'NEM', 'FCX', 'DOW', 'PPG', 'ALB', 'NUE', 'CLF', 'VMC',
+                              'MLM'],
+                'utilities': ['NEE', 'DUK', 'SO', 'D', 'SRE', 'AEP', 'EXC', 'XEL', 'PEG', 'ED', 'WEC', 'ES', 'AWK',
+                              'DTE']
+            }
+
+            # Find matching sector
+            for key, stocks in sector_map.items():
+                if sector in key or key in sector:
+                    return stocks
+
+        # Check for market cap filters to optimize
+        filters = parsed_query.get('filters', [])
+        for filter_def in filters:
+            if filter_def.get('field') == 'market_cap':
+                operator = filter_def.get('operator')
+                value = filter_def.get('value', 0)
+
+                # For small caps, use different universe
+                if operator in ['<', '<='] and value <= 10e9:
+                    # Return mix of smaller stocks
+                    return self.stock_universe[-100:]  # Last 100 stocks tend to be smaller
+                elif operator in ['>', '>='] and value >= 100e9:
+                    # Return large caps
+                    return self.stock_universe[:100]  # First 100 tend to be larger
+
+        # For dividend queries, focus on dividend paying stocks
+        characteristics = qualitative.get('characteristics', [])
+        for char in characteristics:
+            if 'dividend' in char.lower():
+                # Known dividend payers
+                return ['JNJ', 'PG', 'KO', 'PEP', 'ABBV', 'MRK', 'VZ', 'T', 'XOM', 'CVX',
+                        'JPM', 'BAC', 'WFC', 'USB', 'PNC', 'HD', 'LOW', 'WMT', 'TGT', 'COST',
+                        'MCD', 'SBUX', 'NKE', 'O', 'SPG', 'PSA', 'WELL', 'AMT', 'CCI', 'DLR']
+
+        # Default: return top stocks by market cap
+        return self.stock_universe[:200]  # Limit to 200 for performance
+
+    async def _fetch_stock_data_batch(self, symbols: List[str], batch_size: int = 50) -> List[StockData]:
+        """Fetch stock data in batches for efficiency"""
+        all_stocks = []
+
+        # Process in batches
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+
+            # Use ThreadPoolExecutor for parallel fetching
+            tasks = []
+            for symbol in batch:
+                task = self.data_provider.get_stock_data(symbol)
+                tasks.append(task)
+
+            # Gather results
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Filter out failed fetches
+            for result in results:
+                if isinstance(result, StockData):
+                    all_stocks.append(result)
+
+        return all_stocks
+
+    def _needs_advanced_filtering(self, parsed_query: Dict[str, Any]) -> bool:
+        """Check if query needs advanced filtering with historical data"""
+        characteristics = parsed_query.get('qualitative', {}).get('characteristics', [])
+
+        advanced_keywords = [
+            'momentum', 'trend', 'breakout', 'oversold', 'overbought',
+            'volatility', 'beta', 'correlation', 'drawdown',
+            'technical', 'rsi', 'macd', 'moving average'
+        ]
+
+        for char in characteristics:
+            for keyword in advanced_keywords:
+                if keyword in char.lower():
+                    return True
+
+        return False
+
+    async def _apply_advanced_filters(self, stocks: List[StockData],
+                                      parsed_query: Dict[str, Any]) -> List[StockData]:
+        """Apply advanced filters that require historical data"""
+        characteristics = parsed_query.get('qualitative', {}).get('characteristics', [])
+        filtered = stocks
+
+        for char in characteristics:
+            char_lower = char.lower()
+
+            if 'momentum' in char_lower or 'trending' in char_lower:
+                # Filter by price momentum
+                momentum_stocks = []
+                for stock in filtered:
+                    try:
+                        hist = await self.data_provider.get_historical_data(stock.symbol, "3mo")
+                        if not hist.empty and len(hist) > 20:
+                            # Calculate 20-day momentum
+                            momentum = (hist['Close'].iloc[-1] / hist['Close'].iloc[-20] - 1) * 100
+                            if momentum > 10:  # 10% gain in 20 days
+                                momentum_stocks.append(stock)
+                    except:
+                        pass
+                filtered = momentum_stocks if momentum_stocks else filtered
+
+            elif 'oversold' in char_lower:
+                # Filter by RSI < 30
+                oversold_stocks = []
+                for stock in filtered:
+                    try:
+                        indicators = await self.data_provider.get_technical_indicators(stock.symbol)
+                        if indicators and indicators.rsi < 30:
+                            oversold_stocks.append(stock)
+                    except:
+                        pass
+                filtered = oversold_stocks if oversold_stocks else filtered
+
+            elif 'breakout' in char_lower:
+                # Filter by stocks near 52-week high
+                breakout_stocks = []
+                for stock in filtered:
+                    if stock.year_high and stock.current_price:
+                        if stock.current_price >= stock.year_high * 0.95:  # Within 5% of high
+                            breakout_stocks.append(stock)
+                filtered = breakout_stocks if breakout_stocks else filtered
+
+        return filtered
 
     def _apply_filters(self, stocks: List[StockData], filters: List[Dict[str, Any]]) -> List[StockData]:
         """Apply quantitative filters to stocks"""
