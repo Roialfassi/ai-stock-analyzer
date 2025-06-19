@@ -807,25 +807,45 @@ class MainWindow(QMainWindow):
         # Run async task
         worker = AsyncWorker(analyze())
 
-        def on_complete(result):
-            loading.hide_loading()
-            if result:
-                analysis_widget.display_analysis(result)
-                self.current_symbol = symbol
-                self.current_analysis = result
-                self.statusBar().showMessage(f"Analysis complete for {symbol}", 3000)
+        def on_analyze_complete(analysis_result: Optional[AnalysisResult]): # Added type hint
+            try:
+                loading.hide_loading()
+                if analysis_result and isinstance(analysis_result, AnalysisResult):
+                    if hasattr(analysis_widget, 'display_analysis'):
+                        analysis_widget.display_analysis(analysis_result)
+                    else: # pragma: no cover
+                        logger.error("AnalysisDashboard is missing display_analysis method.")
+                        QMessageBox.critical(self, "UI Error", "Cannot display analysis results: component is invalid.")
+                        if self.content_tabs.indexOf(analysis_widget) != -1: self.content_tabs.removeTab(tab_index)
+                        return
 
-        def on_error(error):
-            loading.hide_loading()
-            QMessageBox.critical(self, "Analysis Error", f"Failed to analyze {symbol}:\n{error}")
-            self.content_tabs.removeTab(tab_index)
+                    self.current_symbol = symbol
+                    self.current_analysis = analysis_result # Store the successful analysis
+                    self.statusBar().showMessage(f"Analysis complete for {symbol}", 3000)
+                elif analysis_result is None:
+                    logger.warning(f"Analysis for {symbol} returned no data (None).")
+                    QMessageBox.warning(self, "Analysis Incomplete", f"Analysis for {symbol} did not return any data.")
+                    if self.content_tabs.indexOf(analysis_widget) != -1: self.content_tabs.removeTab(tab_index)
+            except Exception as e: # Catch errors during UI update itself # pragma: no cover
+                logger.exception(f"Error displaying analysis results for {symbol}: {e}")
+                QMessageBox.critical(self, "UI Error", f"Failed to display analysis results for {symbol}: {e}")
+                if self.content_tabs.indexOf(analysis_widget) != -1 : self.content_tabs.removeTab(tab_index)
 
-        worker.result_ready.connect(on_complete)
-        worker.error_occurred.connect(on_error)
+        def on_analyze_error(error_message: str):
+            loading.hide_loading()
+            logger.error(f"Async analysis error for {symbol}: {error_message}", exc_info=False)
+            QMessageBox.critical(self, "Analysis Error", f"Failed to analyze {symbol}:\n{error_message.splitlines()[0]}")
+            if self.content_tabs.indexOf(analysis_widget) != -1 : self.content_tabs.removeTab(tab_index)
+
+        worker.result_ready.connect(on_analyze_complete)
+        worker.error_occurred.connect(on_analyze_error)
         worker.start()
 
     def analyze_from_screener(self, symbol: str):
         """Analyze stock from screener results"""
+        if not symbol: # pragma: no cover
+            QMessageBox.warning(self, "Analyze Stock", "No symbol provided.")
+            return
         self.analyze_stock(symbol)
 
     def show_screener(self):
@@ -857,30 +877,56 @@ class MainWindow(QMainWindow):
             return await self.stock_screener.screen_stocks(query)
 
         # Run async task
-        worker = AsyncWorker(screen())
+        worker = AsyncWorker(screen_coro()) # Renamed coro in previous patch
 
-        def on_complete(result):
-            progress.close()
-            if result:
-                # Clear previous results
+        def on_screen_complete(screen_result: Optional[StockScreenResult]):
+            try:
+                progress.close()
+                if not hasattr(self, 'screener_results') or not self.screener_results: # pragma: no cover
+                    logger.error("Screener results table widget is not available.")
+                    return
+
                 self.screener_results.clear_stocks()
 
-                # Add new results
-                for stock in result.matches:
-                    self.screener_results.add_stock(stock)
+                if screen_result and isinstance(screen_result, StockScreenResult):
+                    if screen_result.matches:
+                        for stock_data_item in screen_result.matches:
+                            if isinstance(stock_data_item, StockData):
+                                try:
+                                    self.screener_results.add_stock(stock_data_item)
+                                except Exception as e_add: # pragma: no cover
+                                    logger.exception(f"Error adding stock {getattr(stock_data_item, 'symbol', 'Unknown')} to screener UI: {e_add}")
+                                    QMessageBox.warning(self, "UI Update Error", f"Could not display stock {getattr(stock_data_item, 'symbol', 'Unknown')} in results.")
+                            else:
+                                logger.warning(f"Invalid item type '{type(stock_data_item)}' in screener matches, expected StockData.")
 
-                self.statusBar().showMessage(
-                    f"Found {result.total_count} stocks in {result.execution_time:.1f}s",
-                    5000
-                )
+                        status_msg = f"Screening found {screen_result.total_count} stocks in {screen_result.execution_time:.1f}s"
+                        self.statusBar().showMessage(status_msg, 5000)
+                        if not screen_result.matches:
+                             QMessageBox.information(self, "Screening Results", "No stocks matched your criteria to display (though some might have been found).")
+                    else:
+                        self.statusBar().showMessage("No stocks matched your screening criteria.", 3000)
+                        QMessageBox.information(self, "Screening Results", "No stocks matched your criteria.")
+                elif screen_result is None:
+                     logger.info("Stock screening returned None (no data).")
+                     QMessageBox.information(self, "Screening Results", "Screening completed but returned no data.")
+            except AttributeError as ae: # pragma: no cover
+                 logger.exception(f"Screener UI component missing: {ae}")
+                 QMessageBox.critical(self, "UI Error", "Screener display component is missing. Cannot show results.")
+            except Exception as e: # Catch any other errors during UI update # pragma: no cover
+                logger.exception(f"Error updating UI with screening results: {e}")
+                QMessageBox.critical(self, "UI Error", f"Failed to display screening results: {e}")
 
-        def on_error(error):
+        def on_screen_error(error_message: str):
             progress.close()
-            QMessageBox.warning(self, "Screening Error", f"Failed to screen stocks:\n{error}")
+            logger.error(f"Screening operation failed: {error_message}", exc_info=False)
+            QMessageBox.critical(self, "Screening Error", f"Failed to screen stocks:\n{error_message.splitlines()[0]}")
 
-        worker.result_ready.connect(on_complete)
-        worker.error_occurred.connect(on_error)
+
+        worker.result_ready.connect(on_screen_complete)
+        worker.error_occurred.connect(on_screen_error)
         worker.start()
+
 
     def close_tab(self, index: int):
         """Close a content tab"""
@@ -917,28 +963,74 @@ class MainWindow(QMainWindow):
         """Update watchlist display"""
         self.watchlist_widget.clear()
 
-        # Create async task to get prices
-        async def get_prices():
-            prices = {}
-            for symbol in self.watchlist:
-                stock_data = await self.data_provider.get_stock_data(symbol)
-                if stock_data:
-                    prices[symbol] = stock_data.current_price
-            return prices
+        # Create async task to get prices (renamed coro)
+        async def get_watchlist_data_coro():
+            # Gathers (symbol, price_or_error_string) tuples
+            results = []
+            if not hasattr(self, 'data_provider') or not self.data_provider: # Service check
+                logger.error("Watchlist: MarketDataProvider not available for fetching prices.")
+                # Return current watchlist symbols with an error message for each
+                return [(s, "Data Service Error") for s in self.watchlist]
 
-        # Run async task
-        worker = AsyncWorker(get_prices())
+            for symbol_wl in self.watchlist:
+                try:
+                    stock_data_wl = await self.data_provider.get_stock_data(symbol_wl)
+                    if stock_data_wl and stock_data_wl.current_price is not None:
+                        results.append((symbol_wl, stock_data_wl.current_price))
+                    elif stock_data_wl:
+                        results.append((symbol_wl, "N/P"))
+                    else:
+                        results.append((symbol_wl, "No Data")) # Changed from "Error" to be more specific
+                except Exception as e: # pragma: no cover
+                    logger.error(f"Error fetching watchlist data for {symbol_wl}: {e}", exc_info=True)
+                    results.append((symbol_wl, "Fetch Error"))
+            return results
 
-        def on_complete(prices):
-            for symbol in self.watchlist:
-                price = prices.get(symbol, 0)
-                item_text = f"{symbol}"
-                if price > 0:
-                    item_text += f" - ${price:.2f}"
-                self.watchlist_widget.addItem(item_text)
+        worker = AsyncWorker(get_watchlist_data_coro())
 
-        worker.result_ready.connect(on_complete)
+        def on_watchlist_data_ready(data_results: list):
+            try:
+                if not hasattr(self, 'watchlist_widget') or not self.watchlist_widget: # pragma: no cover
+                    logger.error("Watchlist widget not available for UI update.")
+                    return
+                self.watchlist_widget.clear()
+
+                if not data_results and self.watchlist:
+                    self.watchlist_widget.addItem("Could not fetch data for watchlist items.")
+                elif not self.watchlist:
+                     self.watchlist_widget.addItem("Watchlist is empty. Add symbols.")
+
+                for symbol_res, price_or_error in data_results:
+                    item = QListWidgetItem()
+                    item_text = f"{symbol_res}"
+                    if isinstance(price_or_error, (float, int)) and pd.notna(price_or_error):
+                        item_text += f" - ${price_or_error:.2f}"
+                    elif isinstance(price_or_error, str):
+                        item_text += f" - ({price_or_error})"
+                    else:
+                        item_text += " - (Data N/A)"
+                    item.setText(item_text)
+                    self.watchlist_widget.addItem(item)
+            except AttributeError as ae: # pragma: no cover
+                 logger.exception(f"Watchlist UI component (e.g. watchlist_widget) missing: {ae}")
+            except Exception as e: # pragma: no cover
+                logger.exception(f"Error updating watchlist UI: {e}")
+                if hasattr(self, 'watchlist_widget') and self.watchlist_widget:
+                     try: self.watchlist_widget.addItem("Error updating display.")
+                     except Exception: pass
+
+        def on_watchlist_error(error_msg: str): # pragma: no cover
+            logger.error(f"Async error updating watchlist: {error_msg}", exc_info=False)
+            if hasattr(self, 'watchlist_widget') and self.watchlist_widget:
+                try:
+                    self.watchlist_widget.clear()
+                    self.watchlist_widget.addItem(f"Error updating watchlist: {error_msg.split(':')[0]}.")
+                except Exception: pass
+
+        worker.result_ready.connect(on_watchlist_data_ready)
+        worker.error_occurred.connect(on_watchlist_error)
         worker.start()
+
 
     def new_portfolio(self):
         """Create new portfolio"""
@@ -1013,54 +1105,131 @@ class MainWindow(QMainWindow):
     def portfolio_changed(self, name: str):
         """Handle portfolio selection change"""
         if name:
-            # Update portfolio display
-            async def update():
+            async def update_portfolio_data_coro():
+                if not self.portfolio_manager: return None
+
                 portfolio = self.portfolio_manager.get_portfolio(name)
                 if portfolio:
                     await self.portfolio_manager.update_portfolio(name)
-                    return portfolio
+                    return self.portfolio_manager.get_portfolio(name)
+                logger.warning(f"Portfolio '{name}' not found before update attempt.")
                 return None
 
-            worker = AsyncWorker(update())
+            worker = AsyncWorker(update_portfolio_data_coro())
 
-            def on_complete(portfolio):
-                if portfolio:
-                    self.portfolio_summary.set_portfolio(portfolio)
+            def on_portfolio_update_complete(updated_portfolio: Optional[Portfolio]):
+                try:
+                    if not hasattr(self, 'portfolio_summary') or not self.portfolio_summary: # pragma: no cover
+                        logger.error("Portfolio summary widget not available.")
+                        return
 
-            worker.result_ready.connect(on_complete)
+                    if updated_portfolio and isinstance(updated_portfolio, Portfolio):
+                        self.portfolio_summary.set_portfolio(updated_portfolio)
+                    elif name:
+                        logger.warning(f"Portfolio '{name}' data could not be retrieved or is None after update attempt.")
+                        QMessageBox.warning(self, "Portfolio Update", f"Could not retrieve updated data for portfolio '{name}'. It might have been deleted or an error occurred.")
+                        self.portfolio_summary.clear_portfolio()
+                except AttributeError as ae: # pragma: no cover
+                    logger.exception(f"Portfolio summary UI component missing: {ae}")
+                    QMessageBox.critical(self, "UI Error", "Portfolio display component is missing.")
+                except Exception as e: # pragma: no cover
+                    logger.exception(f"Error updating portfolio UI for '{name}': {e}")
+                    QMessageBox.critical(self, "UI Error", f"Failed to display portfolio '{name}': {e}")
+
+            def on_portfolio_update_error(error_message: str):
+                logger.error(f"Async error updating portfolio '{name}': {error_message}", exc_info=False)
+                QMessageBox.critical(self, "Portfolio Update Error",
+                                     f"Failed to update portfolio '{name}':\n{error_message.splitlines()[0]}")
+                if hasattr(self, 'portfolio_manager') and self.portfolio_manager and \
+                   hasattr(self, 'portfolio_summary') and self.portfolio_summary:
+                    stale_portfolio = self.portfolio_manager.get_portfolio(name)
+                    if stale_portfolio: self.portfolio_summary.set_portfolio(stale_portfolio, is_stale=True)
+                    else: self.portfolio_summary.clear_portfolio()
+
+
+            worker.result_ready.connect(on_portfolio_update_complete)
+            worker.error_occurred.connect(on_portfolio_update_error)
             worker.start()
+        except Exception as e: # pragma: no cover
+            logger.exception(f"Error initiating portfolio change handling for '{name}': {e}")
+            QMessageBox.critical(self, "Portfolio Error", f"Could not process portfolio change: {e}")
+
 
     def update_market_data(self):
         """Update market overview data"""
+        if not self.data_provider:
+            logger.warning("Market Overview: MarketDataProvider not available.")
+            if hasattr(self, 'update_label') and self.update_label:
+                self.update_label.setText("Last update: Service unavailable")
+            return
 
-        async def get_market_data():
+        async def get_market_data_coro():
+            if not self.data_provider: return None
             return await self.data_provider.get_market_overview()
 
-        worker = AsyncWorker(get_market_data())
+        worker = AsyncWorker(get_market_data_coro())
 
-        def on_complete(market_data):
-            if market_data:
-                # Update index displays
-                for index, data in market_data.indices.items():
-                    symbol = index.replace(" ", "_")
-                    price_label = self.findChild(QLabel, f"{symbol}_price")
-                    change_label = self.findChild(QLabel, f"{symbol}_change")
+        def on_market_data_ready(market_data_result: Optional[MarketOverview]):
+            try:
+                if not (market_data_result and isinstance(market_data_result, MarketOverview)):
+                    logger.warning("Market overview update returned None or invalid data type.")
+                    if hasattr(self, 'statusBar') and self.statusBar():
+                        self.statusBar().showMessage("Failed to update market overview data.", 3000)
+                    return
 
-                    if price_label:
-                        price_label.setText(f"${data['price']:.2f}")
+                index_name_to_symbol_map = {
+                    "S&P 500": "SPY", "NASDAQ": "QQQ", "Dow Jones": "DIA",
+                    "VIX": "VIX"
+                }
 
-                    if change_label:
-                        change = data['change']
-                        change_pct = data['change_pct']
-                        color = "green" if change >= 0 else "red"
-                        change_label.setText(f"{change:+.2f} ({change_pct:+.2f}%)")
-                        change_label.setStyleSheet(f"color: {color};")
+                for display_name, data_val in market_data_result.indices.items():
+                    obj_base_name = index_name_to_symbol_map.get(display_name, display_name.replace(" ", "_"))
 
-                # Update timestamp
-                self.update_label.setText(f"Last update: {datetime.now().strftime('%H:%M:%S')}")
+                    price_label = self.findChild(QLabel, f"{obj_base_name}_price")
+                    change_label = self.findChild(QLabel, f"{obj_base_name}_change")
 
-        worker.result_ready.connect(on_complete)
+                    if price_label and isinstance(data_val, dict) and 'price' in data_val:
+                        price_val = data_val['price']
+                        price_label.setText(f"${price_val:.2f}" if pd.notna(price_val) else "N/A")
+
+                    if change_label and isinstance(data_val, dict) and 'change' in data_val and 'change_pct' in data_val:
+                        change, change_pct = data_val['change'], data_val['change_pct']
+                        if pd.notna(change) and pd.notna(change_pct):
+                            color = "green" if change >= 0 else "red"
+                            change_label.setText(f"{change:+.2f} ({change_pct:+.2f}%)")
+                            change_label.setStyleSheet(f"color: {color};")
+                        else:
+                            change_label.setText("--")
+                            change_label.setStyleSheet("")
+
+                vix_widget_name = index_name_to_symbol_map.get("VIX", "VIX") + "_price"
+                vix_price_label = self.findChild(QLabel, vix_widget_name)
+                if vix_price_label and market_data_result.vix is not None and pd.notna(market_data_result.vix):
+                    vix_price_label.setText(f"VIX: {market_data_result.vix:.2f}")
+                elif vix_price_label:
+                     vix_price_label.setText("VIX: N/A")
+
+
+                if hasattr(self, 'update_label') and self.update_label:
+                    self.update_label.setText(f"Last update: {datetime.now().strftime('%H:%M:%S')}")
+
+            except AttributeError as ae: # pragma: no cover
+                logger.exception(f"Market Data UI component missing: {ae}")
+            except Exception as e: # pragma: no cover
+                logger.exception(f"Error updating market data UI: {e}")
+                if hasattr(self, 'statusBar') and self.statusBar():
+                    self.statusBar().showMessage(f"Error updating market UI: {e}", 3000)
+
+        def on_market_data_error(error_msg: str): # pragma: no cover
+            logger.error(f"Async error updating market data: {error_msg}", exc_info=False)
+            if hasattr(self, 'statusBar') and self.statusBar():
+                self.statusBar().showMessage(f"Market data update failed: {error_msg.splitlines()[0]}.")
+
+
+        worker.result_ready.connect(on_market_data_ready)
+        worker.error_occurred.connect(on_market_data_error)
         worker.start()
+
 
     def closeEvent(self, event: QCloseEvent):
         """Handle window close event"""

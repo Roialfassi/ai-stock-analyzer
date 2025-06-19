@@ -20,31 +20,59 @@ logger = logging.getLogger(__name__)
 class StockScreener:
     """Main stock screening engine"""
 
-    def __init__(self, data_provider: MarketDataProvider, nl_screener: NaturalLanguageScreener):
+    def __init__(self, data_provider: MarketDataProvider, nl_screener: Optional[NaturalLanguageScreener]):
+        if data_provider is None: # Should ideally be enforced by type hints in Python 3.9+ if using a linter
+            logger.critical("StockScreener initialized with no DataProvider. Screener will not function.")
+            raise ValueError("DataProvider cannot be None for StockScreener")
+
         self.data_provider = data_provider
-        self.nl_screener = nl_screener
-        self.stock_universe = []
+        self.nl_screener = nl_screener # nl_screener can be None if LLM provider is not configured
+        self.stock_universe: List[str] = []
         self.cache = ScreenerCache()
-        self._load_stock_universe()
-
-        # Preload some data for faster screening
-        self.preloaded_data = {}
-        asyncio.create_task(self._preload_popular_stocks())
-
-    async def _preload_popular_stocks(self):
-        """Preload data for popular stocks to speed up screening"""
-        popular = self.stock_universe[:50]  # Top 50 stocks
 
         try:
-            for symbol in popular:
-                data = await self.data_provider.get_stock_data(symbol)
-                if data:
-                    self.preloaded_data[symbol] = data
-        except Exception as e:
-            logger.error(f"Error preloading stocks: {e}")
+            self._load_stock_universe() # This can fail if Wikipedia is inaccessible
+        except Exception as e: # pragma: no cover
+            logger.error(f"Failed to load initial stock universe: {e}. Stock screener may have limited scope.", exc_info=True)
+            # Fallback to a very basic list if loading fails entirely
+            if not self.stock_universe:
+                self.stock_universe = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA"] # Minimal fallback
 
-    async def _fetch_stock_data(self, symbols: List[str]) -> List[StockData]:
-        """Fetch data for multiple stocks with preloaded cache"""
+        self.preloaded_data: Dict[str, StockData] = {}
+        try:
+            # Using asyncio.create_task without storing it can sometimes hide exceptions
+            # if not awaited or handled properly. For background tasks, ensure errors are logged within the task.
+            self._preload_task = asyncio.create_task(self._preload_popular_stocks())
+        except Exception as e: # pragma: no cover
+            logger.error(f"Failed to create asyncio task for preloading stocks: {e}", exc_info=True)
+
+
+    async def _preload_popular_stocks(self):
+        """Preload data for popular stocks to speed up screening. Handles its own errors."""
+        if not self.data_provider: return # Should not happen if __init__ check is in place
+
+        # Use a slice of the universe; ensure universe is not empty
+        popular_symbols = self.stock_universe[:50] if self.stock_universe else []
+        if not popular_symbols:
+            logger.info("No stock universe available for preloading.")
+            return
+
+        logger.info(f"Preloading data for {len(popular_symbols)} popular stocks...")
+        try:
+            for symbol in popular_symbols:
+                try:
+                    data = await self.data_provider.get_stock_data(symbol)
+                    if data:
+                        self.preloaded_data[symbol] = data
+                except Exception as e_stock: # Catch error for a single stock
+                    logger.warning(f"Error preloading stock data for {symbol}: {e_stock}", exc_info=True) # Log with traceback
+            logger.info(f"Preloading complete. {len(self.preloaded_data)} stocks preloaded.")
+        except Exception as e_main: # Catch any other unexpected error in the preload loop
+            logger.error(f"Unexpected error during _preload_popular_stocks main loop: {e_main}", exc_info=True)
+
+
+    async def _fetch_stock_data(self, symbols: List[str]) -> List[StockData]: # Note: This method seems unused, _fetch_stock_data_batch is used instead.
+        """Fetch data for multiple stocks with preloaded cache (seems unused, keeping for now)"""
         stocks = []
         symbols_to_fetch = []
 
@@ -113,10 +141,17 @@ class StockScreener:
             sp500_symbols = [s.replace('.', '-') for s in sp500_symbols]
 
             # Combine with major stocks
-            self.stock_universe = list(set(major_stocks + sp500_symbols))
-        except:
-            # Fallback to predefined list
-            self.stock_universe = major_stocks
+            self.stock_universe = sorted(list(set(major_stocks + sp500_symbols))) # Sorted for consistency
+        except requests.exceptions.RequestException as e: # More specific for network issues with read_html
+            logger.error(f"Network error fetching S&P 500 list from Wikipedia: {e}. Falling back to predefined list.")
+            self.stock_universe = sorted(list(set(major_stocks)))
+        except ImportError: # If lxml or other parser for read_html is missing
+             logger.error("Missing a parser library (like lxml) for pd.read_html. Falling back to predefined list.")
+             self.stock_universe = sorted(list(set(major_stocks)))
+        except Exception as e: # Catch any other error during Wikipedia fetch
+            logger.error(f"Error fetching or parsing S&P 500 list from Wikipedia: {e}. Falling back to predefined list.", exc_info=True)
+            self.stock_universe = sorted(list(set(major_stocks)))
+
 
         # Add popular ETFs for sector screening
         self.etf_universe = {
@@ -149,57 +184,94 @@ class StockScreener:
         start_time = datetime.now()
 
         # Check cache first
+        start_time = datetime.now()
+        cache_key = f"screen:{query}"
+        default_empty_result = ScreeningResult(
+            query=ScreeningQuery(raw_query=query, parsed_criteria={}, filters=[]),
+            matches=[], total_count=0, execution_time=0, explanations={}
+        )
+
         if use_cache:
-            cache_key = f"screen:{query}"
-            cached = self.cache.get(cache_key)
-            if cached:
-                return ScreeningResult(**cached)
+            try:
+                cached = self.cache.get(cache_key)
+                if cached:
+                    # Ensure cached data can be unpacked into ScreeningResult
+                    return ScreeningResult(**cached)
+            except Exception as e_cache: # pragma: no cover
+                logger.warning(f"Error reading from screener cache for query '{query}': {e_cache}. Refetching.")
 
-        # Parse the query
-        parsed_query = await self.nl_screener.parse_query(query)
+        if not self.nl_screener:
+            logger.error("NaturalLanguageScreener is not available. Cannot parse query.")
+            # Return an error or a result indicating failure
+            default_empty_result.explanations = {"error": "NL Screener service not available."}
+            return default_empty_result
 
-        # Create screening query object
-        screening_query = ScreeningQuery(
-            raw_query=query,
-            parsed_criteria=parsed_query,
-            filters=parsed_query.get('filters', []),
-            sort_by=parsed_query.get('sort_by', 'market_cap'),
-            sort_order=parsed_query.get('sort_order', 'desc'),
-            limit=parsed_query.get('limit', 50)
-        )
+        parsed_query_dict: Dict[str, Any] = {}
+        try:
+            parsed_query_dict = await self.nl_screener.parse_query(query)
+            if not parsed_query_dict or parsed_query_dict.get("error"): # Check if nl_screener returned an error
+                error_msg = parsed_query_dict.get("error", "NL query parsing failed, no specific error given.")
+                logger.error(f"Failed to parse natural language query '{query}': {error_msg}")
+                default_empty_result.explanations = {"error": f"Query parsing failed: {error_msg}"}
+                return default_empty_result
+        except Exception as e_parse: # pragma: no cover
+            logger.exception(f"Exception during NL query parsing for '{query}': {e_parse}")
+            default_empty_result.explanations = {"error": f"Exception during query parsing: {e_parse}"}
+            return default_empty_result
 
-        # Determine which stocks to fetch based on query
-        stocks_to_fetch = self._optimize_stock_selection(parsed_query)
-
-        # Batch fetch stock data efficiently
-        stock_data = await self._fetch_stock_data_batch(stocks_to_fetch)
-
-        # Apply filters
-        filtered_stocks = self._apply_filters(stock_data, screening_query.filters)
-
-        # Apply qualitative filters
-        if 'qualitative' in parsed_query:
-            filtered_stocks = self._apply_qualitative_filters(
-                filtered_stocks,
-                parsed_query['qualitative']
+        try:
+            screening_query_obj = ScreeningQuery(
+                raw_query=query,
+                parsed_criteria=parsed_query_dict, # Use the validated dict
+                filters=parsed_query_dict.get('filters', []),
+                sort_by=parsed_query_dict.get('sort_by', 'market_cap'),
+                sort_order=parsed_query_dict.get('sort_order', 'desc'),
+                limit=int(parsed_query_dict.get('limit', 50)) # Ensure limit is int
             )
+        except (TypeError, ValueError) as e_sq: # pragma: no cover
+            logger.error(f"Error creating ScreeningQuery object from parsed query: {e_sq}. Parsed: {parsed_query_dict}", exc_info=True)
+            default_empty_result.explanations = {"error": f"Internal error processing parsed query: {e_sq}"}
+            return default_empty_result
 
-        # Apply advanced filters if needed
-        if self._needs_advanced_filtering(parsed_query):
-            filtered_stocks = await self._apply_advanced_filters(filtered_stocks, parsed_query)
+        # Initialize explanations in case of early exit
+        explanations_dict: Dict[str, str] = {}
 
-        # Sort results
-        sorted_stocks = self._sort_stocks(
-            filtered_stocks,
-            screening_query.sort_by,
-            screening_query.sort_order
-        )
+        try:
+            stocks_to_fetch = self._optimize_stock_selection(parsed_query_dict)
+            if not stocks_to_fetch: # If universe is empty or no suitable stocks
+                logger.warning(f"No stocks selected for fetching based on query: {query}")
+                # Fallback to default empty result, but with the parsed query
+                default_empty_result.query = screening_query_obj
+                return default_empty_result
 
-        # Limit results
-        final_stocks = sorted_stocks[:screening_query.limit]
 
-        # Generate explanations
-        explanations = await self.nl_screener.explain_matches(query, final_stocks)
+            stock_data_list = await self._fetch_stock_data_batch(stocks_to_fetch)
+            if not stock_data_list:
+                logger.info(f"No stock data fetched for query: {query}")
+                # Return empty result, but with the parsed query
+                default_empty_result.query = screening_query_obj
+                return default_empty_result
+
+
+            filtered_stocks = self._apply_filters(stock_data_list, screening_query_obj.filters)
+
+            if 'qualitative' in parsed_query_dict and parsed_query_dict['qualitative']:
+                filtered_stocks = self._apply_qualitative_filters(filtered_stocks, parsed_query_dict['qualitative'])
+
+            if self._needs_advanced_filtering(parsed_query_dict):
+                filtered_stocks = await self._apply_advanced_filters(filtered_stocks, parsed_query_dict)
+
+            sorted_stocks = self._sort_stocks(filtered_stocks, screening_query_obj.sort_by, screening_query_obj.sort_order)
+            final_stocks = sorted_stocks[:screening_query_obj.limit]
+
+            if final_stocks and self.nl_screener: # Only generate explanations if there are stocks and screener exists
+                explanations_dict = await self.nl_screener.explain_matches(query, final_stocks)
+
+        except Exception as e_screen_flow: # Catch errors in the main screening flow # pragma: no cover
+            logger.exception(f"Error during stock screening process for query '{query}': {e_screen_flow}")
+            default_empty_result.query = screening_query_obj # Keep the parsed query
+            default_empty_result.explanations = {"error": f"Screening process failed: {e_screen_flow}"}
+            return default_empty_result
 
         # Calculate execution time
         execution_time = (datetime.now() - start_time).total_seconds()
@@ -212,380 +284,528 @@ class StockScreener:
             explanations=explanations
         )
 
-        # Cache result
-        if use_cache:
-            self.cache.set(cache_key, result.__dict__, 300)  # 5 min cache
-
+        # Cache result (even if it's an error state from above, to avoid re-processing bad queries quickly)
+        if use_cache and self.cache:
+            try:
+                self.cache.set(cache_key, result.__dict__, 300)  # 5 min cache
+            except Exception as e_cache_set: # pragma: no cover
+                 logger.error(f"Error trying to set screener cache for query '{query}': {e_cache_set}")
         return result
 
     def _optimize_stock_selection(self, parsed_query: Dict[str, Any]) -> List[str]:
-        """Optimize which stocks to fetch based on query"""
-        qualitative = parsed_query.get('qualitative', {})
-        sector = qualitative.get('sector', '').lower()
+        """Optimize which stocks to fetch based on query. Returns a list of symbols."""
+        try:
+            qualitative = parsed_query.get('qualitative', {}) if isinstance(parsed_query, dict) else {}
+            sector = qualitative.get('sector', '').lower() if isinstance(qualitative, dict) else ""
 
-        # If sector specified, filter universe first
-        if sector:
-            sector_map = {
-                'technology': ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'INTC', 'AMD', 'CRM', 'ADBE', 'ORCL', 'CSCO',
-                               'AVGO', 'QCOM', 'TXN', 'MU'],
-                'healthcare': ['JNJ', 'UNH', 'PFE', 'ABBV', 'TMO', 'MRK', 'ABT', 'CVS', 'BMY', 'AMGN', 'GILD', 'MDT',
-                               'ISRG', 'VRTX', 'MRNA'],
-                'finance': ['JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'AXP', 'BLK', 'SCHW', 'V', 'MA', 'PYPL', 'COF', 'USB',
-                            'PNC'],
-                'energy': ['XOM', 'CVX', 'COP', 'SLB', 'EOG', 'MPC', 'PSX', 'VLO', 'OXY', 'KMI', 'HAL', 'BKR', 'DVN',
-                           'FANG'],
-                'consumer': ['WMT', 'HD', 'PG', 'KO', 'PEP', 'COST', 'MCD', 'NKE', 'SBUX', 'TGT', 'LOW', 'DIS', 'CMCSA',
-                             'NFLX'],
-                'industrial': ['BA', 'CAT', 'GE', 'MMM', 'HON', 'UPS', 'RTX', 'LMT', 'DE', 'EMR', 'FDX', 'NSC', 'UNP',
-                               'WM'],
-                'realestate': ['AMT', 'PLD', 'CCI', 'EQIX', 'PSA', 'SPG', 'WELL', 'AVB', 'EQR', 'DLR', 'O', 'SBAC',
-                               'WY', 'VTR'],
-                'materials': ['LIN', 'APD', 'SHW', 'ECL', 'DD', 'NEM', 'FCX', 'DOW', 'PPG', 'ALB', 'NUE', 'CLF', 'VMC',
-                              'MLM'],
-                'utilities': ['NEE', 'DUK', 'SO', 'D', 'SRE', 'AEP', 'EXC', 'XEL', 'PEG', 'ED', 'WEC', 'ES', 'AWK',
-                              'DTE']
-            }
+            # If sector specified, attempt to narrow down. This is a very rough heuristic.
+            if sector:
+                # This sector_map is a placeholder for a more dynamic sector classification system.
+                sector_map = {
+                    'technology': ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'INTC', 'AMD', 'CRM', 'ADBE', 'ORCL'],
+                    'healthcare': ['JNJ', 'UNH', 'PFE', 'ABBV', 'TMO', 'MRK', 'ABT', 'CVS', 'BMY', 'AMGN'],
+                    # ... (add more sectors and representative stocks)
+                }
+                for map_sector, example_stocks in sector_map.items():
+                    if sector in map_sector or map_sector in sector: # Basic matching
+                        logger.debug(f"Optimizing selection for sector '{sector}', using example stocks.")
+                        # Return a mix of example stocks and some from general universe for diversity
+                        return list(set(example_stocks + self.stock_universe[:50]))[:100] # Limit size
 
-            # Find matching sector
-            for key, stocks in sector_map.items():
-                if sector in key or key in sector:
-                    return stocks
+            # Check for market cap filters to potentially narrow down universe (very coarse)
+            filters = parsed_query.get('filters', []) if isinstance(parsed_query, dict) else []
+            for filter_def in filters:
+                if isinstance(filter_def, dict) and filter_def.get('field') == 'market_cap':
+                    operator = filter_def.get('operator')
+                    value = filter_def.get('value', 0)
+                    try:
+                        numeric_value = float(value)
+                        if operator in ['<', '<='] and numeric_value <= 2e9: # Small cap
+                            logger.debug("Optimizing for small cap query.")
+                            return self.stock_universe[-100:] if self.stock_universe else [] # Example: last 100 might be smaller
+                        elif operator in ['>', '>='] and numeric_value >= 200e9: # Mega cap
+                            logger.debug("Optimizing for mega cap query.")
+                            return self.stock_universe[:50] if self.stock_universe else [] # Example: first 50
+                    except ValueError: # pragma: no cover
+                        logger.warning(f"Market cap filter value '{value}' is not numeric, cannot optimize selection.")
 
-        # Check for market cap filters to optimize
-        filters = parsed_query.get('filters', [])
-        for filter_def in filters:
-            if filter_def.get('field') == 'market_cap':
-                operator = filter_def.get('operator')
-                value = filter_def.get('value', 0)
+            # Default: return a sizable chunk of the general universe if no strong optimizer.
+            # Ensure stock_universe is not empty before slicing.
+            return self.stock_universe[:200] if self.stock_universe else []
+        except Exception as e: # pragma: no cover
+            logger.exception(f"Error during stock selection optimization: {e}. Defaulting to full universe (limited).")
+            return self.stock_universe[:200] if self.stock_universe else []
 
-                # For small caps, use different universe
-                if operator in ['<', '<='] and value <= 10e9:
-                    # Return mix of smaller stocks
-                    return self.stock_universe[-100:]  # Last 100 stocks tend to be smaller
-                elif operator in ['>', '>='] and value >= 100e9:
-                    # Return large caps
-                    return self.stock_universe[:100]  # First 100 tend to be larger
-
-        # For dividend queries, focus on dividend paying stocks
-        characteristics = qualitative.get('characteristics', [])
-        for char in characteristics:
-            if 'dividend' in char.lower():
-                # Known dividend payers
-                return ['JNJ', 'PG', 'KO', 'PEP', 'ABBV', 'MRK', 'VZ', 'T', 'XOM', 'CVX',
-                        'JPM', 'BAC', 'WFC', 'USB', 'PNC', 'HD', 'LOW', 'WMT', 'TGT', 'COST',
-                        'MCD', 'SBUX', 'NKE', 'O', 'SPG', 'PSA', 'WELL', 'AMT', 'CCI', 'DLR']
-
-        # Default: return top stocks by market cap
-        return self.stock_universe[:200]  # Limit to 200 for performance
 
     async def _fetch_stock_data_batch(self, symbols: List[str], batch_size: int = 50) -> List[StockData]:
         """Fetch stock data in batches for efficiency"""
-        all_stocks = []
+        if not self.data_provider: # Should be caught by __init__ but defensive
+            logger.error("Fetch batch: MarketDataProvider not available.")
+            return []
+        if not symbols:
+            return []
 
-        # Process in batches
-        for i in range(0, len(symbols), batch_size):
-            batch = symbols[i:i + batch_size]
+        all_fetched_stocks: List[StockData] = []
+        try:
+            for i in range(0, len(symbols), batch_size):
+                current_batch_symbols = symbols[i:i + batch_size]
 
-            # Use ThreadPoolExecutor for parallel fetching
-            tasks = []
-            for symbol in batch:
-                task = self.data_provider.get_stock_data(symbol)
-                tasks.append(task)
+                # Create tasks for the current batch
+                tasks = [self.data_provider.get_stock_data(s) for s in current_batch_symbols]
 
-            # Gather results
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+                # Gather results for the batch, allowing individual tasks to fail
+                # get_stock_data itself returns None on error, so exceptions here are less likely
+                # unless gather itself has an issue or get_stock_data re-raises something unexpected.
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Filter out failed fetches
-            for result in results:
-                if isinstance(result, StockData):
-                    all_stocks.append(result)
+                for symbol_idx, res_or_exc in enumerate(batch_results):
+                    original_symbol = current_batch_symbols[symbol_idx]
+                    if isinstance(res_or_exc, StockData):
+                        all_fetched_stocks.append(res_or_exc)
+                    elif isinstance(res_or_exc, Exception): # pragma: no cover
+                        logger.error(f"Exception fetching data for {original_symbol} in batch: {res_or_exc}", exc_info=res_or_exc)
+                    # If res_or_exc is None (get_stock_data handled its error), it's skipped.
+            return all_fetched_stocks
+        except Exception as e: # Catch errors related to batching or asyncio.gather itself
+            logger.exception(f"Error during _fetch_stock_data_batch: {e}")
+            return all_fetched_stocks # Return any stocks fetched so far
 
-        return all_stocks
 
     def _needs_advanced_filtering(self, parsed_query: Dict[str, Any]) -> bool:
         """Check if query needs advanced filtering with historical data"""
-        characteristics = parsed_query.get('qualitative', {}).get('characteristics', [])
+        try:
+            # Ensure parsed_query is a dict, and qualitative and characteristics are lists
+            qualitative_data = parsed_query.get('qualitative', {}) if isinstance(parsed_query, dict) else {}
+            characteristics = qualitative_data.get('characteristics', []) if isinstance(qualitative_data, dict) else []
 
-        advanced_keywords = [
-            'momentum', 'trend', 'breakout', 'oversold', 'overbought',
-            'volatility', 'beta', 'correlation', 'drawdown',
-            'technical', 'rsi', 'macd', 'moving average'
-        ]
+            if not isinstance(characteristics, list): # pragma: no cover
+                logger.warning(f"Advanced Filter Check: 'characteristics' is not a list: {characteristics}")
+                return False
 
-        for char in characteristics:
-            for keyword in advanced_keywords:
-                if keyword in char.lower():
-                    return True
+            advanced_keywords = [
+                'momentum', 'trend', 'breakout', 'oversold', 'overbought',
+                'volatility', 'beta', 'correlation', 'drawdown',
+                'technical', 'rsi', 'macd', 'moving average', 'ma ', 'support', 'resistance' # Added more specific MA terms
+            ]
 
-        return False
+            for char_item in characteristics:
+                if not isinstance(char_item, str): continue # Skip non-string characteristics
+                char_lower = char_item.lower()
+                for keyword in advanced_keywords:
+                    if keyword in char_lower:
+                        return True
+            return False
+        except Exception as e: # pragma: no cover
+            logger.exception(f"Error in _needs_advanced_filtering: {e}. Query: {parsed_query}")
+            return False
+
 
     async def _apply_advanced_filters(self, stocks: List[StockData],
                                       parsed_query: Dict[str, Any]) -> List[StockData]:
         """Apply advanced filters that require historical data"""
-        characteristics = parsed_query.get('qualitative', {}).get('characteristics', [])
-        filtered = stocks
+        if not self.data_provider: # pragma: no cover
+            logger.error("Advanced Filters: MarketDataProvider not available.")
+            return stocks # Return original list if data provider is missing
 
-        for char in characteristics:
-            char_lower = char.lower()
+        try:
+            qualitative_data = parsed_query.get('qualitative', {}) if isinstance(parsed_query, dict) else {}
+            characteristics = qualitative_data.get('characteristics', []) if isinstance(qualitative_data, dict) else []
 
-            if 'momentum' in char_lower or 'trending' in char_lower:
-                # Filter by price momentum
-                momentum_stocks = []
-                for stock in filtered:
-                    try:
-                        hist = await self.data_provider.get_historical_data(stock.symbol, "3mo")
-                        if not hist.empty and len(hist) > 20:
-                            # Calculate 20-day momentum
-                            momentum = (hist['Close'].iloc[-1] / hist['Close'].iloc[-20] - 1) * 100
-                            if momentum > 10:  # 10% gain in 20 days
-                                momentum_stocks.append(stock)
-                    except:
-                        pass
-                filtered = momentum_stocks if momentum_stocks else filtered
+            if not isinstance(characteristics, list): # pragma: no cover
+                 logger.warning(f"Advanced Filter: 'characteristics' is not a list: {characteristics}")
+                 return stocks
 
-            elif 'oversold' in char_lower:
-                # Filter by RSI < 30
-                oversold_stocks = []
-                for stock in filtered:
-                    try:
-                        indicators = await self.data_provider.get_technical_indicators(stock.symbol)
-                        if indicators and indicators.rsi < 30:
-                            oversold_stocks.append(stock)
-                    except:
-                        pass
-                filtered = oversold_stocks if oversold_stocks else filtered
+            current_filtered_stocks = list(stocks) # Work on a copy
 
-            elif 'breakout' in char_lower:
-                # Filter by stocks near 52-week high
-                breakout_stocks = []
-                for stock in filtered:
-                    if stock.year_high and stock.current_price:
-                        if stock.current_price >= stock.year_high * 0.95:  # Within 5% of high
-                            breakout_stocks.append(stock)
-                filtered = breakout_stocks if breakout_stocks else filtered
+            for char_item in characteristics:
+                if not isinstance(char_item, str): continue
+                char_lower = char_item.lower()
 
-        return filtered
+                next_batch_to_filter = [] # Stocks that passed previous characteristic filters
+
+                if 'momentum' in char_lower or 'trending' in char_lower:
+                    for stock in current_filtered_stocks:
+                        try:
+                            # get_technical_indicators often includes momentum scores or MAs
+                            ti = await self.data_provider.get_technical_indicators(stock.symbol)
+                            if ti and ti.momentum_score is not None and ti.momentum_score > 70: # Example threshold
+                                next_batch_to_filter.append(stock)
+                            elif ti and 'bullish' in ti.trend_direction.lower(): # Check trend
+                                 next_batch_to_filter.append(stock)
+                        except Exception as e_mom: # pragma: no cover
+                            logger.warning(f"Error applying momentum/trend filter for {stock.symbol}: {e_mom}")
+                    current_filtered_stocks = next_batch_to_filter
+
+                elif 'oversold' in char_lower:
+                    for stock in current_filtered_stocks:
+                        try:
+                            ti = await self.data_provider.get_technical_indicators(stock.symbol)
+                            if ti and ti.rsi is not None and ti.rsi < 30:
+                                next_batch_to_filter.append(stock)
+                        except Exception as e_rsi: # pragma: no cover
+                            logger.warning(f"Error applying oversold (RSI) filter for {stock.symbol}: {e_rsi}")
+                    current_filtered_stocks = next_batch_to_filter
+
+                elif 'overbought' in char_lower: # Added overbought
+                    for stock in current_filtered_stocks:
+                        try:
+                            ti = await self.data_provider.get_technical_indicators(stock.symbol)
+                            if ti and ti.rsi is not None and ti.rsi > 70:
+                                next_batch_to_filter.append(stock)
+                        except Exception as e_rsi_ob: # pragma: no cover
+                             logger.warning(f"Error applying overbought (RSI) filter for {stock.symbol}: {e_rsi_ob}")
+                    current_filtered_stocks = next_batch_to_filter
+
+
+                elif 'breakout' in char_lower: # Near 52-week high and strong volume
+                    for stock in current_filtered_stocks:
+                        try:
+                            # StockData should have year_high, current_price, volume, avg_volume
+                            if stock.year_high is not None and stock.current_price is not None and \
+                               stock.volume is not None and stock.avg_volume is not None and stock.avg_volume > 0:
+                                if stock.current_price >= stock.year_high * 0.95 and \
+                                   stock.volume > stock.avg_volume * 1.5: # Price near high and volume up
+                                    next_batch_to_filter.append(stock)
+                        except Exception as e_bo: # pragma: no cover
+                            logger.warning(f"Error applying breakout filter for {stock.symbol}: {e_bo}")
+                    current_filtered_stocks = next_batch_to_filter
+
+            return current_filtered_stocks
+        except Exception as e_adv: # pragma: no cover
+            logger.exception(f"Unexpected error in _apply_advanced_filters: {e_adv}")
+            return stocks # Return original list on major failure
+
 
     def _apply_filters(self, stocks: List[StockData], filters: List[Dict[str, Any]]) -> List[StockData]:
         """Apply quantitative filters to stocks"""
-        filtered = stocks
+        if not filters:
+            return stocks
+
+        current_filtered_stocks = list(stocks) # Operate on a copy
 
         for filter_def in filters:
-            field = filter_def['field']
-            operator = filter_def['operator']
-            value = filter_def['value']
+            if not isinstance(filter_def, dict): # pragma: no cover
+                logger.warning(f"Skipping malformed filter definition (not a dict): {filter_def}")
+                continue
 
-            filtered = [
-                stock for stock in filtered
-                if self._evaluate_filter(stock, field, operator, value)
+            field = filter_def.get('field')
+            operator = filter_def.get('operator')
+            target_value = filter_def.get('value') # Renamed 'value' to 'target_value' to avoid conflict
+
+            if not all([field, operator, target_value is not None]): # Ensure all parts are present
+                logger.warning(f"Skipping incomplete filter definition: {filter_def}")
+                continue
+
+            # This list comprehension creates a new list in each iteration.
+            # For very large stock lists and many filters, this could be inefficient.
+            # Consider in-place removal or building a new list once if performance becomes an issue.
+            current_filtered_stocks = [
+                s for s in current_filtered_stocks
+                if self._evaluate_filter(s, field, operator, target_value)
             ]
+        return current_filtered_stocks
 
-        return filtered
 
-    def _evaluate_filter(self, stock: StockData, field: str, operator: str, value: Any) -> bool:
+    def _evaluate_filter(self, stock: StockData, field: str, operator: str, target_value: Any) -> bool:
         """Evaluate a single filter condition"""
-        # Map common field names to StockData attributes
+        # Map common field names to StockData attributes (case-insensitive)
         field_mapping = {
-            'price': 'current_price',
-            'market_cap': 'market_cap',
-            'pe': 'pe_ratio',
-            'pe_ratio': 'pe_ratio',
-            'dividend': 'dividend_yield',
-            'dividend_yield': 'dividend_yield',
-            'volume': 'volume',
-            'beta': 'beta',
-            'profit_margin': 'profit_margin',
-            'debt_to_equity': 'debt_to_equity',
-            'roe': 'roe',
-            'revenue': 'revenue',
-            'revenue_growth': 'revenue_growth'
+            'price': 'current_price', 'market_cap': 'market_cap',
+            'pe': 'pe_ratio', 'pe_ratio': 'pe_ratio',
+            'dividend': 'dividend_yield', 'dividend_yield': 'dividend_yield',
+            'volume': 'volume', 'beta': 'beta',
+            'profit_margin': 'profit_margin', 'debt_to_equity': 'debt_to_equity',
+            'roe': 'roe', 'revenue': 'revenue', 'revenue_growth': 'revenue_growth',
+            'eps': 'eps', 'eps_growth': 'eps_growth', # Added EPS fields
+            'forward_pe': 'forward_pe', 'peg_ratio': 'peg_ratio', 'price_to_book': 'price_to_book'
         }
 
-        # Get the actual field name
-        actual_field = field_mapping.get(field.lower(), field.lower())
+        actual_field_name = field_mapping.get(str(field).lower(), str(field).lower())
 
-        # Get the stock value
-        stock_value = getattr(stock, actual_field, None)
-        if stock_value is None:
-            return False
-
-        # Apply operator
         try:
-            if operator == '>':
-                return stock_value > value
-            elif operator == '<':
-                return stock_value < value
-            elif operator == '>=':
-                return stock_value >= value
-            elif operator == '<=':
-                return stock_value <= value
-            elif operator == '==' or operator == '=':
-                return stock_value == value
-            elif operator == '!=' or operator == '<>':
-                return stock_value != value
+            stock_attr_value = getattr(stock, actual_field_name, None)
+        except AttributeError: # Should not happen if StockData model is consistent # pragma: no cover
+            logger.warning(f"Filter Eval: Attribute '{actual_field_name}' not found on StockData for {stock.symbol}. Skipping filter.")
+            return False # Or True, depending on desired strictness (fail open vs fail closed)
+
+        if stock_attr_value is None: # If attribute exists but its value is None
+            return False # Cannot compare None with a value
+
+        # Ensure target_value is of a comparable type, attempting conversion if needed
+        try:
+            if isinstance(stock_attr_value, (int, float)) and not isinstance(target_value, (int, float)):
+                target_value_coerced = float(target_value)
+            elif isinstance(stock_attr_value, str) and not isinstance(target_value, str): # pragma: no cover
+                target_value_coerced = str(target_value)
             else:
-                logger.warning(f"Unknown operator: {operator}")
-                return True
-        except:
+                target_value_coerced = target_value # Assume types are compatible or target_value is already correct
+        except ValueError: # pragma: no cover
+            logger.warning(f"Filter Eval: Could not coerce target value '{target_value}' to compare with stock value '{stock_attr_value}' for field '{actual_field_name}'.")
             return False
+
+        try:
+            if operator == '>': return stock_attr_value > target_value_coerced
+            elif operator == '<': return stock_attr_value < target_value_coerced
+            elif operator == '>=': return stock_attr_value >= target_value_coerced
+            elif operator == '<=': return stock_attr_value <= target_value_coerced
+            elif operator == '==' or operator == '=': return stock_attr_value == target_value_coerced
+            elif operator == '!=' or operator == '<>': return stock_attr_value != target_value_coerced
+            # Add 'in' or 'contains' for string fields if needed
+            elif operator.lower() == 'in' and isinstance(stock_attr_value, str) and isinstance(target_value_coerced, str):
+                 return target_value_coerced.lower() in stock_attr_value.lower() # Case-insensitive substring
+            else: # pragma: no cover
+                logger.warning(f"Filter Eval: Unknown operator '{operator}' for field '{actual_field_name}'. Filter returns False.")
+                return False # Default to False for unknown operators for safety
+        except TypeError: # If comparison fails due to incompatible types after coercion attempt # pragma: no cover
+            logger.warning(f"Filter Eval: TypeError comparing '{stock_attr_value}' ({type(stock_attr_value)}) "
+                           f"with '{target_value_coerced}' ({type(target_value_coerced)}) for field '{actual_field_name}'.")
+            return False
+        except Exception as e: # Catch any other unexpected comparison error # pragma: no cover
+            logger.exception(f"Filter Eval: Unexpected error evaluating filter for {stock.symbol} on field {actual_field_name}: {e}")
+            return False
+
 
     def _apply_qualitative_filters(self, stocks: List[StockData],
                                    qualitative: Dict[str, Any]) -> List[StockData]:
         """Apply qualitative filters like sector, characteristics"""
-        filtered = stocks
+        if not qualitative or not isinstance(qualitative, dict):
+            return stocks # No qualitative filters to apply
+
+        current_filtered_stocks = list(stocks)
 
         # Filter by sector
-        if 'sector' in qualitative and qualitative['sector']:
-            sector = qualitative['sector'].lower()
-            filtered = [
-                stock for stock in filtered
-                if stock.sector.lower() == sector or sector in stock.sector.lower()
+        sector_filter = qualitative.get('sector')
+        if sector_filter and isinstance(sector_filter, str) and sector_filter.strip():
+            sector_lower = sector_filter.strip().lower()
+            current_filtered_stocks = [
+                s for s in current_filtered_stocks
+                if hasattr(s, 'sector') and isinstance(s.sector, str) and (
+                    s.sector.lower() == sector_lower or sector_lower in s.sector.lower()
+                )
             ]
 
         # Filter by characteristics
-        if 'characteristics' in qualitative:
-            for characteristic in qualitative['characteristics']:
-                filtered = self._filter_by_characteristic(filtered, characteristic)
+        characteristics_list = qualitative.get('characteristics')
+        if characteristics_list and isinstance(characteristics_list, list):
+            for char_item in characteristics_list:
+                if isinstance(char_item, str) and char_item.strip():
+                    # Each characteristic filter might reduce the list further
+                    current_filtered_stocks = self._filter_by_characteristic(current_filtered_stocks, char_item.strip())
 
-        return filtered
+        return current_filtered_stocks
+
 
     def _filter_by_characteristic(self, stocks: List[StockData], characteristic: str) -> List[StockData]:
         """Filter stocks by qualitative characteristics"""
-        characteristic = characteristic.lower()
+        char_lower = characteristic.lower() # Already lowercased by caller if called internally
 
-        if 'growing' in characteristic:
-            if 'earnings' in characteristic or 'profit' in characteristic:
-                return [s for s in stocks if s.eps_growth and s.eps_growth > 0]
-            elif 'revenue' in characteristic:
-                return [s for s in stocks if s.revenue_growth and s.revenue_growth > 0]
+        # Using a helper to safely get and check attributes
+        def check_stock(stock: StockData, attr_name: str, condition_fn) -> bool:
+            val = getattr(stock, attr_name, None)
+            # Ensure val is not None and is a number (float/int) before applying condition
+            return val is not None and isinstance(val, (float, int)) and pd.notna(val) and condition_fn(val)
 
-        elif 'dividend' in characteristic:
-            if 'aristocrat' in characteristic:
-                # Simplified - would need dividend history
-                return [s for s in stocks if s.dividend_yield and s.dividend_yield > 0.02]
-            else:
-                return [s for s in stocks if s.dividend_yield and s.dividend_yield > 0]
+        try:
+            if 'growing earnings' in char_lower or 'profit growth' in char_lower:
+                return [s for s in stocks if check_stock(s, 'eps_growth', lambda x: x > 0.05)] # e.g. >5%
+            elif 'growing revenue' in char_lower:
+                return [s for s in stocks if check_stock(s, 'revenue_growth', lambda x: x > 0.10)] # e.g. >10%
+            elif 'strong dividend' in char_lower: # Example: yield > 3% and low payout (if payout was available)
+                return [s for s in stocks if check_stock(s, 'dividend_yield', lambda x: x > 0.03)]
+            elif 'dividend aristocrat' in char_lower: # Simplified: yield > 2%, low debt
+                return [s for s in stocks if check_stock(s, 'dividend_yield', lambda x: x > 0.02) and \
+                                             check_stock(s, 'debt_to_equity', lambda x: x < 0.75)]
+            elif 'low debt' in char_lower:
+                return [s for s in stocks if check_stock(s, 'debt_to_equity', lambda x: x < 0.5)]
+            elif 'high roe' in char_lower:
+                 return [s for s in stocks if check_stock(s, 'roe', lambda x: x > 0.15)] # ROE > 15%
+            elif 'high profit margin' in char_lower:
+                return [s for s in stocks if check_stock(s, 'profit_margin', lambda x: x > 0.20)] # Profit Margin > 20%
+            elif 'undervalued' in char_lower: # Simple P/E and P/B based
+                return [s for s in stocks if check_stock(s, 'pe_ratio', lambda x: x > 0 and x < 15) and \
+                                             check_stock(s, 'price_to_book', lambda x: x > 0 and x < 1.5)]
+            elif 'growth stock' in char_lower: # High revenue growth and potentially higher PE
+                return [s for s in stocks if check_stock(s, 'revenue_growth', lambda x: x > 0.15) and \
+                                             check_stock(s, 'forward_pe', lambda x: x > 10)] # Allow higher PE for growth
+            elif 'value stock' in char_lower: # Low PE, Low P/B, possibly decent dividend
+                return [s for s in stocks if check_stock(s, 'pe_ratio', lambda x: x > 0 and x < 12) and \
+                                             check_stock(s, 'price_to_book', lambda x: x > 0 and x < 1) and \
+                                             check_stock(s, 'dividend_yield', lambda x: x > 0.01)]
+            else: # Unknown characteristic
+                logger.debug(f"Unknown characteristic filter: '{characteristic}'. No stocks filtered by it.")
+                return stocks
+        except Exception as e: # pragma: no cover
+            logger.exception(f"Error applying characteristic filter '{characteristic}': {e}")
+            return stocks # Return original list on error to avoid losing all stocks
 
-        elif 'low debt' in characteristic:
-            return [s for s in stocks if s.debt_to_equity and s.debt_to_equity < 1.0]
-
-        elif 'high margin' in characteristic:
-            return [s for s in stocks if s.profit_margin and s.profit_margin > 0.15]
-
-        elif 'undervalued' in characteristic:
-            # Simple P/E based valuation
-            return [s for s in stocks if s.pe_ratio and s.pe_ratio < 20]
-
-        elif 'growth' in characteristic:
-            return [s for s in stocks if s.revenue_growth and s.revenue_growth > 0.1]
-
-        elif 'value' in characteristic:
-            return [s for s in stocks if s.pe_ratio and s.pe_ratio < 15 and s.price_to_book and s.price_to_book < 3]
-
-        # Default - return all
-        return stocks
 
     def _sort_stocks(self, stocks: List[StockData], sort_by: str, order: str) -> List[StockData]:
         """Sort stocks by specified field"""
-        # Map sort fields
-        sort_mapping = {
-            'market_cap': lambda s: s.market_cap or 0,
-            'price': lambda s: s.current_price or 0,
-            'pe_ratio': lambda s: s.pe_ratio or float('inf'),
-            'dividend_yield': lambda s: s.dividend_yield or 0,
-            'volume': lambda s: s.volume or 0,
-            'revenue_growth': lambda s: s.revenue_growth or 0,
-            'profit_margin': lambda s: s.profit_margin or 0,
-            'symbol': lambda s: s.symbol
+        if not stocks:
+            return []
+
+        # Define how to handle None values for sorting:
+        # For numeric fields, None could be treated as very small (for asc) or very large (for desc)
+        # or simply be placed at the end. Python's default sort places None at the beginning.
+        # Using a large/small number for None helps keep numeric sort consistent.
+        # For string fields, None can be converted to an empty string.
+
+        # Map common sort fields to StockData attributes and provide default for None
+        sort_field_map = {
+            'market_cap': lambda s: getattr(s, 'market_cap', 0) or 0, # None market_cap treated as 0
+            'price': lambda s: getattr(s, 'current_price', 0) or 0,
+            'pe_ratio': lambda s: getattr(s, 'pe_ratio', float('inf')) or float('inf'), # High PE for None if ascending
+            'dividend_yield': lambda s: getattr(s, 'dividend_yield', 0) or 0, # None yield as 0
+            'volume': lambda s: getattr(s, 'volume', 0) or 0,
+            'revenue_growth': lambda s: getattr(s, 'revenue_growth', -float('inf')) or -float('inf'), # Very low growth for None
+            'profit_margin': lambda s: getattr(s, 'profit_margin', -float('inf')) or -float('inf'),
+            'symbol': lambda s: getattr(s, 'symbol', '') or '' # Empty string for None symbol
         }
 
-        key_func = sort_mapping.get(sort_by, lambda s: s.market_cap or 0)
-        reverse = (order == 'desc')
+        sort_key_func = sort_field_map.get(sort_by.lower(), sort_field_map['market_cap']) # Default to market_cap
+        is_reverse = (str(order).lower() == 'desc')
 
-        return sorted(stocks, key=key_func, reverse=reverse)
+        try:
+            return sorted(stocks, key=sort_key_func, reverse=is_reverse)
+        except TypeError as te: # pragma: no cover
+            # This can happen if a lambda tries to compare incompatible types (e.g. None with number, if not handled by key_func)
+            logger.error(f"TypeError during sorting by '{sort_by}': {te}. Check None handling in sort_key_func.")
+            return stocks # Return unsorted on error
+        except Exception as e: # pragma: no cover
+            logger.exception(f"Unexpected error during stock sorting: {e}")
+            return stocks
 
 
 class FilterBuilder:
     """Build filters from common screening patterns"""
 
     @staticmethod
-    def parse_price_filter(text: str) -> Optional[Dict[str, Any]]:
-        """Parse price-related filters"""
-        patterns = [
-            (r'under \$?(\d+)', lambda m: {'field': 'price', 'operator': '<', 'value': float(m.group(1))}),
-            (r'over \$?(\d+)', lambda m: {'field': 'price', 'operator': '>', 'value': float(m.group(1))}),
-            (r'between \$?(\d+) and \$?(\d+)', lambda m: [
-                {'field': 'price', 'operator': '>=', 'value': float(m.group(1))},
-                {'field': 'price', 'operator': '<=', 'value': float(m.group(2))}
-            ])
-        ]
+    def parse_price_filter(text: str) -> Optional[List[Dict[str, Any]]]: # Return list for 'between' case
+        """Parse price-related filters. Can return a list of filters."""
+        try:
+            # Pattern for "under $X" or "less than X"
+            match_under = re.search(r'(?:under|less than|below|max)\s*\$?(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+            if match_under:
+                return [{'field': 'price', 'operator': '<', 'value': float(match_under.group(1))}]
 
-        for pattern, builder in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return builder(match)
+            # Pattern for "over $X" or "more than X"
+            match_over = re.search(r'(?:over|above|more than|greater than|min)\s*\$?(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+            if match_over:
+                return [{'field': 'price', 'operator': '>', 'value': float(match_over.group(1))}]
+
+            # Pattern for "between $X and $Y"
+            match_between = re.search(r'between\s*\$?(\d+(?:\.\d+)?)\s*and\s*\$?(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+            if match_between:
+                val1 = float(match_between.group(1))
+                val2 = float(match_between.group(2))
+                return [
+                    {'field': 'price', 'operator': '>=', 'value': min(val1, val2)},
+                    {'field': 'price', 'operator': '<=', 'value': max(val1, val2)}
+                ]
+        except ValueError as ve: # pragma: no cover
+            logger.error(f"FilterBuilder: Error parsing price value in '{text}': {ve}")
+        except Exception as e: # pragma: no cover
+             logger.exception(f"FilterBuilder: Unexpected error in parse_price_filter for '{text}': {e}")
         return None
+
 
     @staticmethod
-    def parse_market_cap_filter(text: str) -> Optional[Dict[str, Any]]:
+    def parse_market_cap_filter(text: str) -> Optional[List[Dict[str, Any]]]: # Can return list for mid cap
         """Parse market cap filters"""
-        multipliers = {'k': 1e3, 'm': 1e6, 'b': 1e9, 't': 1e12}
+        try:
+            multipliers = {'k': 1e3, 'm': 1e6, 'b': 1e9, 't': 1e12}
 
-        pattern = r'market cap (?:over|above|>) \$?(\d+(?:\.\d+)?)\s*([kmbt])?'
-        match = re.search(pattern, text, re.IGNORECASE)
+            # Generic pattern for over/under with multipliers
+            # e.g., "market cap over 100m", "mkt cap < 2b"
+            pattern_value = r'market cap\s*(?:is\s*)?(<|>|<=|>=|under|over|above|below|less than|more than)\s*\$?([\d\.]+)\s*([kmbt])?'
+            match_value = re.search(pattern_value, text, re.IGNORECASE)
 
-        if match:
-            value = float(match.group(1))
-            multiplier = multipliers.get(match.group(2).lower(), 1) if match.group(2) else 1
-            return {
-                'field': 'market_cap',
-                'operator': '>',
-                'value': value * multiplier
-            }
+            if match_value:
+                operator_str = match_value.group(1).lower()
+                value_num = float(match_value.group(2))
+                unit = match_value.group(3).lower() if match_value.group(3) else ''
+                final_value = value_num * multipliers.get(unit, 1)
 
-        # Small/mid/large cap
-        if 'small cap' in text.lower():
-            return {'field': 'market_cap', 'operator': '<', 'value': 2e9}
-        elif 'mid cap' in text.lower():
-            return [
-                {'field': 'market_cap', 'operator': '>=', 'value': 2e9},
-                {'field': 'market_cap', 'operator': '<=', 'value': 10e9}
-            ]
-        elif 'large cap' in text.lower():
-            return {'field': 'market_cap', 'operator': '>', 'value': 10e9}
+                operator_map = {
+                    '<': '<', 'under': '<', 'below': '<', 'less than': '<',
+                    '>': '>', 'over': '>', 'above': '>', 'more than': '>',
+                    '<=': '<=', '>=': '>='
+                }
+                if operator_str not in operator_map: # Should not happen with regex # pragma: no cover
+                    logger.warning(f"Market Cap Filter: Unknown operator string '{operator_str}'")
+                    return None
 
+                return [{'field': 'market_cap', 'operator': operator_map[operator_str], 'value': final_value}]
+
+            # Predefined cap sizes (these are approximate ranges)
+            if 'small cap' in text.lower():
+                return [{'field': 'market_cap', 'operator': '<=', 'value': 2e9}] # e.g., < $2B
+            elif 'mid cap' in text.lower():
+                return [
+                    {'field': 'market_cap', 'operator': '>', 'value': 2e9},  # > $2B
+                    {'field': 'market_cap', 'operator': '<=', 'value': 10e9} # <= $10B
+                ]
+            elif 'large cap' in text.lower():
+                return [{'field': 'market_cap', 'operator': '>', 'value': 10e9}] # > $10B
+            elif 'mega cap' in text.lower(): # Added mega cap
+                 return [{'field': 'market_cap', 'operator': '>', 'value': 200e9}] # > $200B
+        except ValueError as ve: # pragma: no cover
+            logger.error(f"FilterBuilder: Error parsing market cap value in '{text}': {ve}")
+        except Exception as e: # pragma: no cover
+            logger.exception(f"FilterBuilder: Unexpected error in parse_market_cap_filter for '{text}': {e}")
         return None
+
 
     @staticmethod
     def parse_pe_filter(text: str) -> Optional[Dict[str, Any]]:
         """Parse P/E ratio filters"""
-        pattern = r'p/?e (?:ratio )?(?:under|below|<) (\d+(?:\.\d+)?)'
-        match = re.search(pattern, text, re.IGNORECASE)
+        try:
+            # Pattern for "P/E under X", "PE less than Y", "P/E ratio > Z"
+            match = re.search(r'p/?e(?: ratio)?\s*(<|>|<=|>=|under|over|above|below|less than|more than)\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+            if match:
+                operator_str = match.group(1).lower()
+                value = float(match.group(2))
+                operator_map = {
+                    '<': '<', 'under': '<', 'below': '<', 'less than': '<',
+                    '>': '>', 'over': '>', 'above': '>', 'more than': '>',
+                    '<=': '<=', '>=': '>='
+                }
+                if operator_str not in operator_map: return None # Should not happen # pragma: no cover
 
-        if match:
-            return {
-                'field': 'pe_ratio',
-                'operator': '<',
-                'value': float(match.group(1))
-            }
+                return {'field': 'pe_ratio', 'operator': operator_map[operator_str], 'value': value}
+        except ValueError as ve: # pragma: no cover
+            logger.error(f"FilterBuilder: Error parsing P/E value in '{text}': {ve}")
+        except Exception as e: # pragma: no cover
+            logger.exception(f"FilterBuilder: Unexpected error in parse_pe_filter for '{text}': {e}")
         return None
+
 
     @staticmethod
     def parse_dividend_filter(text: str) -> Optional[Dict[str, Any]]:
         """Parse dividend yield filters"""
-        pattern = r'dividend (?:yield )?(?:over|above|>) (\d+(?:\.\d+)?)\s*%?'
-        match = re.search(pattern, text, re.IGNORECASE)
+        try:
+            # Pattern for "dividend yield over X%", "dividend > Y"
+            match = re.search(r'dividend(?: yield)?\s*(<|>|<=|>=|over|under)\s*([\d\.]+)\s*(%)?', text, re.IGNORECASE)
+            if match:
+                operator_str = match.group(1).lower()
+                value = float(match.group(2))
+                is_percent = match.group(3) == '%'
 
-        if match:
-            value = float(match.group(1))
-            # Convert percentage to decimal if needed
-            if value > 1:
-                value /= 100
-            return {
-                'field': 'dividend_yield',
-                'operator': '>',
-                'value': value
-            }
+                if is_percent or value > 1.0: # If specified as percent (e.g., 3%) or value implies percent (e.g. 3 for 3%)
+                    value /= 100.0
+
+                operator_map = {
+                    '<': '<', 'under': '<',
+                    '>': '>', 'over': '>',
+                    '<=': '<=', '>=': '>='
+                }
+                if operator_str not in operator_map: return None # Should not happen # pragma: no cover
+
+                return {'field': 'dividend_yield', 'operator': operator_map[operator_str], 'value': value}
+        except ValueError as ve: # pragma: no cover
+            logger.error(f"FilterBuilder: Error parsing dividend value in '{text}': {ve}")
+        except Exception as e: # pragma: no cover
+            logger.exception(f"FilterBuilder: Unexpected error in parse_dividend_filter for '{text}': {e}")
         return None
 
 

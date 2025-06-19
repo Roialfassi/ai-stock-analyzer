@@ -56,6 +56,47 @@ class StockData:
     rsi: Optional[float] = None
     last_updated: datetime = field(default_factory=datetime.now)
 
+    def __post_init__(self):
+        # Example of basic type coercion/validation.
+        # In a production system, a dedicated validation library (e.g., Pydantic)
+        # would be more robust for complex models.
+        try:
+            # Coerce fields that are numeric but might be passed as strings by data sources
+            numeric_optionals = [
+                'pe_ratio', 'forward_pe', 'peg_ratio', 'price_to_book',
+                'dividend_yield', 'eps', 'eps_growth', 'revenue',
+                'revenue_growth', 'profit_margin', 'operating_margin',
+                'roe', 'debt_to_equity', 'current_ratio', 'beta',
+                'day_high', 'day_low', 'year_high', 'year_low',
+                'fifty_day_ma', 'two_hundred_day_ma', 'rsi'
+            ]
+            # Fields that must be float if not None
+            if self.current_price is not None: self.current_price = float(self.current_price)
+            if self.market_cap is not None: self.market_cap = float(self.market_cap)
+
+            for attr_name in numeric_optionals:
+                val = getattr(self, attr_name)
+                if val is not None:
+                    setattr(self, attr_name, float(val))
+
+            # Fields that must be int if not None
+            if self.volume is not None: self.volume = int(self.volume)
+            if self.avg_volume is not None: self.avg_volume = int(self.avg_volume)
+
+        except (ValueError, TypeError) as e:
+            # This indicates that data passed to the constructor was not of the expected type
+            # or format that could be coerced.
+            # Depending on application needs, this could log a warning, raise a custom
+            # DataValidationError, or attempt to set fields to None/default.
+            # For this task, we'll just log if a logger was globally available,
+            # otherwise, this might pass silently or be caught by the caller.
+            # print(f"Warning: Type coercion/validation failed for StockData (symbol: {self.symbol}): {e}")
+            # For now, let it pass, assuming consumers will handle potential None values.
+            pass # Or raise a custom validation error
+        except Exception as e: # Catch any other unexpected error during post-init
+            # print(f"Unexpected error in StockData.__post_init__ for {self.symbol}: {e}")
+            pass
+
 
 @dataclass
 class TechnicalIndicators:
@@ -116,6 +157,19 @@ class AnalysisResult:
     peer_comparison: Dict[str, Dict[str, float]] = field(default_factory=dict)
     news_summary: List[NewsItem] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.now)
+
+    def __post_init__(self):
+        # Placeholder for any future validation or post-processing logic.
+        # For example, ensuring scores are within expected ranges (e.g., 0-100).
+        # For this subtask, no specific exception handling is added here beyond the try-pass.
+        try:
+            # Example (currently commented out):
+            # if not (0.0 <= self.overall_score <= 100.0):
+            #     print(f"Warning: AnalysisResult for {self.stock.symbol} has unusual overall_score: {self.overall_score}")
+            pass
+        except Exception as e: # pragma: no cover
+            # print(f"Unexpected error in AnalysisResult.__post_init__ for {self.stock.symbol}: {e}")
+            pass
 
 
 @dataclass
@@ -317,12 +371,28 @@ class CacheEntry:
     """Data caching entry"""
     key: str
     data: Any
-    timestamp: datetime
+    timestamp: float # Assuming this will store time.time() float values
     ttl_seconds: int
 
     def is_expired(self) -> bool:
-        age = (datetime.now() - self.timestamp).total_seconds()
-        return age > self.ttl_seconds
+        try:
+            # Ensure timestamp is a number (float or int)
+            if not isinstance(self.timestamp, (float, int)):
+                # This indicates a problem with how the CacheEntry was created or stored.
+                # Log this issue if a logger is available.
+                # print(f"Error: CacheEntry timestamp for key '{self.key}' is not a numeric type: {type(self.timestamp)}. Treating as expired.")
+                return True # Treat as expired if timestamp is invalid
+
+            current_time_float = datetime.now().timestamp() # Get current time as float
+            age = current_time_float - self.timestamp
+            return age > self.ttl_seconds
+        except TypeError as e: # pragma: no cover
+            # This might happen if self.timestamp is None or an unexpected type that slipped through
+            # print(f"Error: TypeError checking CacheEntry expiry for key '{self.key}': {e}. Timestamp: {self.timestamp}. Treating as expired.")
+            return True
+        except Exception as e: # Catch any other unexpected error # pragma: no cover
+            # print(f"Error: Unexpected error checking CacheEntry expiry for key '{self.key}': {e}. Treating as expired.")
+            return True # Default to expired on any error
 
 
 @dataclass

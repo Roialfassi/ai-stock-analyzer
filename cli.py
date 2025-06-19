@@ -13,20 +13,30 @@ def load_presets():
 
     if os.path.exists(presets_file):
         try:
-            with open(presets_file, 'r') as f:
+            with open(presets_file, 'r', encoding='utf-8') as f: # Added encoding
                 return json.load(f)
-        except:
-            pass
-
+        except (IOError, OSError) as e: # Catch file-related errors
+            print(f"Error: Could not read presets file '{presets_file}': {e}", file=sys.stderr)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in presets file '{presets_file}': {e}", file=sys.stderr)
+        except Exception as e: # Catch any other unexpected error
+            print(f"Error: Unexpected error loading presets from '{presets_file}': {e}", file=sys.stderr)
+    else:
+        # It's not an error if the file doesn't exist, just means no presets saved yet.
+        pass
     return []
 
 
 def list_presets():
     """List available presets"""
-    presets = load_presets()
+    try:
+        presets = load_presets()
+    except Exception as e: # Should be caught by load_presets, but as a defensive measure
+        print(f"Critical error: Failed to load presets for listing: {e}", file=sys.stderr)
+        return
 
     if not presets:
-        print("No presets found. Run the application to create presets.")
+        print("No presets found. You can create presets by running the main application or using the --create flag.")
         return
 
     print("\nAvailable Presets:")
@@ -45,7 +55,11 @@ def list_presets():
 
 def run_with_preset(preset_name: str, skip_market_data: bool = False, demo_mode: bool = False):
     """Run application with specific preset"""
-    presets = load_presets()
+    try:
+        presets = load_presets()
+    except Exception as e: # Defensive
+        print(f"Critical error: Failed to load presets before running: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Find preset
     preset = None
@@ -70,25 +84,37 @@ def run_with_preset(preset_name: str, skip_market_data: bool = False, demo_mode:
         "use_preset": True
     }
 
-    # Launch application with config
-    from PyQt6.QtWidgets import QApplication
-    from main_window import MainWindow
+    try:
+        # Launch application with config
+        from PyQt6.QtWidgets import QApplication
+        from main_window import MainWindow # Assuming main_window.py handles its own startup errors
 
-    app = QApplication(sys.argv)
-    app.setApplicationName("AI Stock Analyzer")
-    app.setOrganizationName("StockAnalyzer")
-    app.setStyle("Fusion")
+        app = QApplication(sys.argv)
+        app.setApplicationName("AI Stock Analyzer")
+        app.setOrganizationName("StockAnalyzer") # Used by QSettings
+        app.setStyle("Fusion") # Optional: set a consistent style
 
-    # Create main window with config
-    window = MainWindow(startup_config=config)
-    window.show()
-
-    sys.exit(app.exec())
+        window = MainWindow(startup_config=config)
+        window.show()
+        sys.exit(app.exec())
+    except ImportError as e:
+        print(f"Error: Failed to import PyQt6 or other GUI components: {e}. "
+              "Please ensure they are installed correctly.", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"An unexpected error occurred while trying to launch the application with preset '{preset_name}': {e}", file=sys.stderr)
+        # import traceback # For debugging, uncomment to see full traceback
+        # traceback.print_exc()
+        sys.exit(1)
 
 
 def create_preset_file(name: str, provider: str, api_key: str, model: Optional[str] = None):
     """Create a new preset from command line"""
-    presets = load_presets()
+    try:
+        presets = load_presets()
+    except Exception as e: # Defensive
+        print(f"Warning: Failed to load existing presets: {e}. A new presets file might be created.", file=sys.stderr)
+        presets = []
 
     # Check if preset already exists
     for p in presets:
@@ -112,17 +138,21 @@ def create_preset_file(name: str, provider: str, api_key: str, model: Optional[s
 
     presets.append(preset)
 
-    # Save presets
     presets_file = os.path.join(os.path.dirname(__file__), "llm_presets.json")
     try:
-        with open(presets_file, 'w') as f:
+        with open(presets_file, 'w', encoding='utf-8') as f: # Added encoding
             json.dump(presets, f, indent=2)
         print(f"✅ Preset '{name}' created successfully!")
-    except Exception as e:
-        print(f"Error saving preset: {e}")
+    except (IOError, OSError) as e:
+        print(f"Error: Could not write presets file '{presets_file}': {e}", file=sys.stderr)
+    except Exception as e: # Catch any other unexpected error during save
+        print(f"Error: Unexpected error saving preset '{name}': {e}", file=sys.stderr)
 
 
 def main():
+    # No top-level logging basicConfig here; let main_window or specific modules handle if GUI runs.
+    # CLI output should primarily be to stdout/stderr.
+
     parser = argparse.ArgumentParser(
         description="AI Stock Analyzer - Command Line Interface",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -156,57 +186,73 @@ Examples:
     parser.add_argument('--api-key', type=str, help='API key for the provider (or URL for LM Studio)')
     parser.add_argument('--model', type=str, help='Model name (optional)')
 
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except argparse.ArgumentError as e:
+        print(f"Argument parsing error: {e}", file=sys.stderr)
+        sys.exit(2)
+    except SystemExit as e:
+        sys.exit(e.code)
 
-    if args.list:
-        list_presets()
-    elif args.preset:
-        run_with_preset(args.preset, args.skip_market_data, args.demo)
-    elif args.create:
-        if not args.provider or not args.api_key:
-            print("Error: --provider and --api-key are required when creating a preset")
-            sys.exit(1)
-        create_preset_file(args.create, args.provider, args.api_key, args.model)
-    else:
-        # Run normal startup flow
-        from PyQt6.QtWidgets import QApplication, QDialog
-        from startup_config import StartupConfigDialog
-        from main_window import MainWindow
 
-        app = QApplication(sys.argv)
-        app.setApplicationName("AI Stock Analyzer")
-        app.setOrganizationName("StockAnalyzer")
-        app.setStyle("Fusion")
+    try:
+        if args.list:
+            list_presets()
+        elif args.preset:
+            run_with_preset(args.preset, args.skip_market_data, args.demo)
+        elif args.create:
+            if not args.provider or not args.api_key:
+                parser.error("--provider and --api-key are required when using --create.")
+            create_preset_file(args.create, args.provider, args.api_key, args.model)
+        else:
+            from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
+            from startup_config import StartupConfigDialog
+            from main_window import MainWindow
 
-        # Show startup configuration dialog
-        config_dialog = StartupConfigDialog()
+            app = QApplication(sys.argv)
+            app.setApplicationName("AI Stock Analyzer")
+            app.setOrganizationName("StockAnalyzer")
+            app.setStyle("Fusion")
 
-        config = None
+            config_dialog = StartupConfigDialog()
+            config = None
 
-        def on_config_complete(cfg):
-            nonlocal config
-            config = cfg
+            def on_config_complete(cfg):
+                nonlocal config
+                config = cfg
 
-        config_dialog.config_complete.connect(on_config_complete)
+            config_dialog.config_complete.connect(on_config_complete)
 
-        if config_dialog.exec() != QDialog.DialogCode.Accepted:
-            sys.exit(0)
+            if config_dialog.exec() != QDialog.DialogCode.Accepted:
+                print("Startup configuration cancelled by user. Exiting.", file=sys.stderr)
+                sys.exit(0)
 
-        if not config:
-            print("Error: No configuration provided")
-            sys.exit(1)
+            if not config:
+                print("Error: Configuration was not set after dialog. Cannot start application.", file=sys.stderr)
+                sys.exit(1)
 
-        # Add command line flags to config
-        if args.skip_market_data:
-            config['skip_market_data'] = True
-        if args.demo:
-            config['demo_mode'] = True
+            if args.skip_market_data:
+                config['skip_market_data'] = True
+            if args.demo:
+                config['demo_mode'] = True
 
-        # Create and show main window
-        window = MainWindow(startup_config=config)
-        window.show()
+            window = MainWindow(startup_config=config)
+            window.show()
+            sys.exit(app.exec())
 
-        sys.exit(app.exec())
+    except ImportError as e:
+        print(f"Error: A required module (likely PyQt6 or a dependency) is missing: {e}. "
+              "Please ensure all dependencies are installed.", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError as e:
+        print(f"Error: A required file was not found: {e}. Please check your installation.", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error: Could not parse a critical JSON file: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"An unexpected error occurred at the CLI top level: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
