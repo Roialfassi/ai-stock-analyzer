@@ -46,7 +46,7 @@ This application combines the power of Large Language Models (LLMs) with real-ti
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/ai-stock-analyzer.git
+git clone https://github.com/Roialfassi/ai-stock-analyzer.git
 cd ai-stock-analyzer
 ```
 
@@ -79,7 +79,6 @@ On first launch, go to **File → Settings** to configure your API keys:
 
 - **OpenAI API Key**: For GPT-4 analysis (get from [OpenAI](https://platform.openai.com))
 - **Anthropic API Key**: For Claude analysis (get from [Anthropic](https://console.anthropic.com))
-- **Alpha Vantage API Key**: For additional market data (get from [Alpha Vantage](https://www.alphavantage.co))
 
 ### LLM Provider
 
@@ -241,8 +240,6 @@ This application is for educational and informational purposes only. It is not f
 ## Support
 
 For issues and feature requests, please use the GitHub issue tracker.
-
-For questions and discussions, join our Discord community: [discord.gg/stockanalysis](https://discord.gg/stockanalysis)
 
 ---
 
