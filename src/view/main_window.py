@@ -2,7 +2,6 @@ from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 
-
 # ----------------------------------------------------------------------
 #                           Main Window
 # ----------------------------------------------------------------------
@@ -11,11 +10,13 @@ from src.model.stock_analyzer import StockAnalyzer
 from src.model.stock_data import StockData
 from src.model.stock_screener import StockScreener
 from src.view.analysis_display import AnalysisDisplay
+from src.model.llm_utils import LLM, LLMProvider
 
 
 class StockAnalyzerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.llm_provider = LLM()
         self.analyzer = StockAnalyzer()
         self.screener = StockScreener()
         self.current_stock = None
@@ -220,9 +221,18 @@ class StockAnalyzerWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def save_api_key(self):
-        self.analyzer.api_key = self.api_key_edit.text().strip()
-        self.analyzer.lm_studio_url = self.lm_url_edit.text().strip()
-        self.analyzer.has_ai = bool(self.analyzer.api_key) or bool(self.analyzer.lm_studio_url)
+        api_key = self.api_key_edit.text().strip()
+        lm_studio_url = self.lm_url_edit.text().strip()
+        has_ai = bool(api_key) or bool(lm_studio_url)
+
+        if has_ai:
+            if lm_studio_url:
+                self.llm_provider = LLM(has_ai=has_ai, provider=LLMProvider.LM_STUDIO, url=lm_studio_url)
+            else:
+                self.llm_provider = LLM(has_ai=has_ai, provider=LLMProvider.OPENAI, key=api_key)
+        else:
+            pass
+        self.analyzer.llm = self.llm_provider
         QMessageBox.information(self, "Saved", "Settings updated.")
 
     # ------------------------------------------------------------------
@@ -231,4 +241,3 @@ class StockAnalyzerWindow(QMainWindow):
         self.analysis_disp.clear_all()
         self.results_tbl.setRowCount(0)
         self.statusBar().showMessage("Cleared")
-

@@ -2,8 +2,11 @@ import json
 from typing import Dict, Optional, Any
 
 # --- Enhanced AI Analyzer ---
+import openai
 import requests
 import re
+
+from src.model.llm_utils import LLM
 from src.model.stock_data import StockData
 import logging
 
@@ -14,28 +17,18 @@ logger = logging.getLogger(__name__)
 
 
 class StockAnalyzer:
-    def __init__(self, api_key: Optional[str] = None, lm_studio_url: Optional[str] = None):
-        self.api_key = api_key
-        self.lm_studio_url = lm_studio_url
-        self.has_ai = bool(api_key) or bool(lm_studio_url)
-        if self.api_key:
-            try:
-                import openai
-                openai.api_key = api_key
-                self.openai = openai
-            except ImportError:
-                self.has_ai = False
-                logger.warning("OpenAI package not installed, using LM Studio or basic analysis")
+    def __init__(self):
+        self.llm = LLM()
 
     def analyze_stock(self, stock_data: StockData) -> Dict[str, Any]:
         """Analyze stock with or without AI, return structured JSON"""
         summary = stock_data.get_summary()
 
-        if not self.has_ai:
+        if not self.llm.has_ai:
             return self._basic_analysis_json(summary)
 
         try:
-            if self.lm_studio_url:
+            if self.llm.url:
                 return self._lm_studio_analysis(summary)
             else:
                 return self._openai_analysis(summary)
@@ -47,8 +40,8 @@ class StockAnalyzer:
         """Use OpenAI for analysis"""
         prompt = self._create_analysis_prompt(summary)
 
-        response = self.openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+        response = openai.ChatCompletion.create(
+            model="gpt-4.1",
             messages=[
                 {"role": "system", "content": "You are a stock analyst. Always respond with valid JSON only."},
                 {"role": "user", "content": prompt}
@@ -69,7 +62,7 @@ class StockAnalyzer:
 
         try:
             response = requests.post(
-                f"{self.lm_studio_url}/v1/chat/completions",
+                f"{self.llm.url}/v1/chat/completions",
                 json={
                     "messages": [
                         {"role": "system", "content": "You are a stock analyst. Always respond with valid JSON only."},
