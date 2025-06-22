@@ -24,18 +24,7 @@ This application combines the power of Large Language Models (LLMs) with real-ti
 - **Sentiment Analysis**: News aggregation and sentiment scoring
 - **AI-Powered Insights**: Multi-step LLM analysis with bull/bear cases
 
-### 💼 Portfolio Management
-- Track multiple portfolios with real-time P&L
-- Risk metrics (Beta, Sharpe ratio, VaR)
-- Dividend tracking and forecasting
-- Tax implications calculator
-- Rebalancing suggestions
 
-### 📈 Professional UI
-- Bloomberg Terminal-inspired dark theme
-- Interactive candlestick charts with technical indicators
-- Real-time market data updates
-- Customizable workspace layouts
 
 ## Installation
 
@@ -44,10 +33,7 @@ This application combines the power of Large Language Models (LLMs) with real-ti
 - Windows, macOS, or Linux
 - No external API keys required for market data (uses yfinance)
 - LLM API key (choose one):
-  - OpenAI API key for GPT-4
-  - Anthropic API key for Claude
-  - Google API key for Gemini
-  - HuggingFace token
+  - OpenAI API key for GPT-4.1
   - OR run locally with LM Studio (no API key needed)
 
 ### Setup
@@ -100,26 +86,6 @@ When you first run the application, you'll see a startup configuration dialog wh
 3. **Save as a preset** for quick access later
 4. **Test the connection** before starting
 
-### Command Line Usage
-
-The application includes a CLI for automation and quick startup:
-
-```bash
-# List all saved presets
-python cli.py --list
-
-# Run with a specific preset
-python cli.py --preset "My GPT-4 Config"
-
-# Skip market data download for faster startup
-python cli.py --preset "Quick Start" --skip-market-data
-
-# Run in demo mode with mock data
-python cli.py --preset "Local LLM" --demo
-
-# Create a new preset from command line
-python cli.py --create "Production" --provider openai --api-key "sk-..." --model gpt-4
-```
 
 ### LLM Provider Setup
 
@@ -127,21 +93,6 @@ python cli.py --create "Production" --provider openai --api-key "sk-..." --model
 1. Get API key from [OpenAI Platform](https://platform.openai.com/api-keys)
 2. Choose model: `gpt-4`, `gpt-4-turbo-preview`, or `gpt-3.5-turbo`
 3. Enter in startup dialog or use CLI
-
-#### Anthropic
-1. Get API key from [Anthropic Console](https://console.anthropic.com/)
-2. Models: `claude-3-opus` or `claude-3-sonnet`
-3. Enter in startup dialog
-
-#### Google Gemini
-1. Get API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
-2. Uses Gemini Pro model
-3. Fast and cost-effective
-
-#### HuggingFace
-1. Get token from [HuggingFace Settings](https://huggingface.co/settings/tokens)
-2. Choose from models like Mixtral, Llama 2, Falcon
-3. Great for open-source models
 
 #### LM Studio (Local)
 1. Download [LM Studio](https://lmstudio.ai/)
@@ -208,28 +159,12 @@ The natural language screener understands queries like:
 3. **Technical Only**: Chart patterns and technical indicators
 4. **Sentiment Only**: News and market sentiment analysis
 
-## Architecture
-
-The application is built with a modular architecture:
-
-```
-├── models.py           # Data models and structures
-├── market_data.py      # Market data integration (yfinance)
-├── llm_analyzer.py     # LLM analysis engine
-├── ui_components.py    # Custom UI widgets
-├── screener.py         # Natural language screening
-├── portfolio.py        # Portfolio management
-└── main_window.py      # Main application window
-```
-
 ### Key Technologies
 
 - **PyQt6**: Modern Qt binding for Python
 - **yfinance**: Yahoo Finance API wrapper
-- **OpenAI/Anthropic APIs**: LLM integration
-- **SQLite**: Local caching database
-- **pandas/numpy**: Data analysis
-- **asyncio**: Asynchronous operations
+- **OpenAI/LM-Studio**: LLM integration
+
 
 ## Advanced Features
 
@@ -298,7 +233,7 @@ The application uses sophisticated chain prompting for analysis:
 
 Run with debug logging:
 ```bash
-python main_window.py --debug
+python main.py --debug
 ```
 
 ## Contributing
