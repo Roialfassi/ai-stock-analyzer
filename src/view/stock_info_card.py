@@ -12,12 +12,12 @@ class StockInfoCard(QWidget):
 
     # Default styling constants (can be overridden)
     DEFAULT_STYLES = {
-        'bg_color': '#2b2b2b',
-        'border_color': '#404040',
+        'bg_color': '#f5f5f5',
+        'border_color': '#6200d5',
         'primary_color': '#4a9eff',
-        'text_primary': '#ffffff',
-        'text_secondary': '#b0b0b0',
-        'hover_color': '#3a3a3a',
+        'text_primary': '#111111',
+        'text_secondary': '#555555',
+        'hover_color': '#121111',
         'border_radius': 8,
         'padding': 12,
         'spacing': 8
