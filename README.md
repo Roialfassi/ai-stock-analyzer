@@ -1,4 +1,5 @@
-# AI-Powered Stock Analysis Desktop Application
+# Stock Analyzer Pro
+## AI-Powered Stock Analysis Desktop Application
 
 A sophisticated desktop application for stock market analysis that leverages LLM capabilities to filter stocks, perform fundamental and technical analysis, and provide investment insights through a modern, professional interface.
 
